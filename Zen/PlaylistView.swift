@@ -7,7 +7,7 @@ import UIKit
 enum PlaylistItem: Identifiable {
     case folder(Folder)
     case playlist(Playlist)
-    
+
     var id: PersistentIdentifier {
         switch self {
         case .folder(let folder):
@@ -16,7 +16,7 @@ enum PlaylistItem: Identifiable {
             return playlist.persistentModelID
         }
     }
-    
+
     var sortOrder: Int {
         switch self {
         case .folder(let folder):
@@ -25,12 +25,31 @@ enum PlaylistItem: Identifiable {
             return playlist.sortOrder
         }
     }
+
+    var name: String {
+        switch self {
+        case .folder(let folder):
+            return folder.name
+        case .playlist(let playlist):
+            return playlist.name
+        }
+    }
+
+    var createdAt: Date {
+        switch self {
+        case .folder(let folder):
+            return folder.createdAt
+        case .playlist(let playlist):
+            return playlist.createdAt
+        }
+    }
 }
 
 struct PlaylistsTab: View {
     @ObservedObject var playerManager: PlayerManager
     var allSongs: [Song]
     var onRefresh: () -> Void
+    var onOpenSettings: (() -> Void)? = nil
     
     @Environment(\.modelContext) private var modelContext
     
@@ -46,58 +65,285 @@ struct PlaylistsTab: View {
     @State private var renameText = ""
     @State private var isRenaming = false
     @State private var searchText = ""
+    /// When creating a new playlist, the folder to put it in (nil = top level).
+    @State private var targetParentFolder: Folder? = nil
+    @State private var sortMode: FolderSortMode = .custom
 
-    var combinedItems: [PlaylistItem] {
+    /// Cached so we don't recompute on every body run (e.g. when playerManager.currentSong changes).
+    @State private var cachedCombinedItems: [PlaylistItem] = []
+
+    // Multi-select state
+    @State private var isSelectMode = false
+    @State private var selectedItems: Set<PersistentIdentifier> = []
+
+    private func updateCombinedItemsCache() {
         let folders = allFolders.filter { $0.modelContext != nil && $0.parent == nil }
         let playlists = allPlaylists.filter { $0.modelContext != nil && $0.parentFolder == nil }
-        
+
         var items: [PlaylistItem] = []
-        items.append(contentsOf: folders.map { PlaylistItem.folder($0) })
-        items.append(contentsOf: playlists.map { PlaylistItem.playlist($0) })
+
+        if !searchText.isEmpty {
+            let query = searchText.lowercased()
+            let matchingFolders = folders.filter { $0.name.lowercased().contains(query) }
+            items.append(contentsOf: matchingFolders.map { PlaylistItem.folder($0) })
+            let matchingTopPlaylists = playlists.filter { $0.name.lowercased().contains(query) }
+            items.append(contentsOf: matchingTopPlaylists.map { PlaylistItem.playlist($0) })
+            let matchingPlaylistsInFolders = getAllMatchingPlaylistsInFolders(folders: folders, query: query)
+            items.append(contentsOf: matchingPlaylistsInFolders.map { PlaylistItem.playlist($0) })
+            let foldersWithMatchingPlaylists = folders.filter {
+                !$0.name.lowercased().contains(query) && folderContainsMatchingPlaylist($0, query: query)
+            }
+            items.append(contentsOf: foldersWithMatchingPlaylists.map { PlaylistItem.folder($0) })
+        } else {
+            items.append(contentsOf: folders.map { PlaylistItem.folder($0) })
+            items.append(contentsOf: playlists.map { PlaylistItem.playlist($0) })
+        }
+
+        cachedCombinedItems = sortItems(items)
+    }
+
+    private func sortItems(_ items: [PlaylistItem]) -> [PlaylistItem] {
+        switch sortMode {
+        case .aToZ:
+            return items.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        case .zToA:
+            return items.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedDescending }
+        case .dateAdded:
+            return items.sorted { $0.createdAt < $1.createdAt }
+        case .custom:
+            return items.sorted { $0.sortOrder < $1.sortOrder }
+        }
+    }
+    
+    // Recursively get all playlists from folders that match the query
+    private func getAllMatchingPlaylistsInFolders(folders: [Folder], query: String) -> [Playlist] {
+        var matchingPlaylists: [Playlist] = []
         
-        return items.sorted { $0.sortOrder < $1.sortOrder }
+        for folder in folders {
+            // Check playlists directly in this folder
+            for playlist in folder.playlists {
+                if playlist.name.lowercased().contains(query) {
+                    matchingPlaylists.append(playlist)
+                }
+            }
+            
+            // Recursively check subfolders
+            matchingPlaylists.append(contentsOf: getAllMatchingPlaylistsInFolders(folders: folder.subFolders, query: query))
+        }
+        
+        return matchingPlaylists
+    }
+    
+    // Recursively check if a folder or its subfolders contain a matching playlist
+    private func folderContainsMatchingPlaylist(_ folder: Folder, query: String) -> Bool {
+        // Check playlists directly in this folder
+        for playlist in folder.playlists {
+            if playlist.name.lowercased().contains(query) {
+                return true
+            }
+        }
+        
+        // Recursively check subfolders
+        for subFolder in folder.subFolders {
+            if folderContainsMatchingPlaylist(subFolder, query: query) {
+                return true
+            }
+        }
+        
+        return false
+    }
+    
+    /// "New Playlist" destination: single button if folder has no sub-folders, dropdown if it has sub-folders.
+    @ViewBuilder
+    private func newPlaylistFolderSubmenu(folder: Folder) -> some View {
+        if folder.subFolders.isEmpty {
+            Button(folder.name) {
+                targetParentFolder = folder
+                isCreatingFolder = false
+                newItemName = ""
+                showingNameAlert = true
+            }
+        } else {
+            Menu(folder.name) {
+                Button("In \(folder.name)") {
+                    targetParentFolder = folder
+                    isCreatingFolder = false
+                    newItemName = ""
+                    showingNameAlert = true
+                }
+                ForEach(folder.subFolders.sorted(by: { $0.sortOrder < $1.sortOrder }), id: \.persistentModelID) { sub in
+                    AnyView(newPlaylistFolderSubmenu(folder: sub))
+                }
+            }
+        }
+    }
+    
+    private func createNewItem() {
+        if isCreatingFolder {
+            modelContext.insert(Folder(name: newItemName))
+        } else {
+            let playlist = Playlist(name: newItemName)
+            playlist.parentFolder = targetParentFolder
+            if let parent = targetParentFolder {
+                let nextOrder = (parent.playlists.map(\.sortOrder).max() ?? -1) + 1
+                playlist.sortOrder = nextOrder
+                parent.playlists.append(playlist)
+            } else {
+                let rootPlaylists = allPlaylists.filter { $0.modelContext != nil && $0.parentFolder == nil }
+                let nextOrder = (rootPlaylists.map(\.sortOrder).max() ?? -1) + 1
+                playlist.sortOrder = nextOrder
+            }
+            modelContext.insert(playlist)
+        }
+        newItemName = ""
+        targetParentFolder = nil
+        try? modelContext.save()
+    }
+    
+    /// "Move to Folder": single button if folder has no sub-folders, dropdown if it has sub-folders.
+    @ViewBuilder
+    private func movePlaylistFolderSubmenu(folder: Folder, playlist: Playlist) -> some View {
+        if folder.subFolders.isEmpty {
+            Button(folder.name) {
+                playlist.parentFolder = folder
+                try? modelContext.save()
+                updateCombinedItemsCache()
+            }
+        } else {
+            Menu(folder.name) {
+                Button("In \(folder.name)") {
+                    playlist.parentFolder = folder
+                    try? modelContext.save()
+                    updateCombinedItemsCache()
+                }
+                ForEach(folder.subFolders.sorted(by: { $0.sortOrder < $1.sortOrder }), id: \.persistentModelID) { sub in
+                    AnyView(movePlaylistFolderSubmenu(folder: sub, playlist: playlist))
+                }
+            }
+        }
     }
     
     var body: some View {
         NavigationStack {
             List {
                 Section {
-                    ForEach(combinedItems) { item in
+                    ForEach(cachedCombinedItems) { item in
                         itemRow(for: item)
                     }
                     .onMove { from, to in
                         moveItems(from: from, to: to)
                     }
+                    .moveDisabled(sortMode != .custom)
+                }
+                
+                // Add bottom padding so mini player doesn't cover last playlist
+                if playerManager.currentSong != nil {
+                    Color.clear
+                        .frame(height: 120)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
                 }
             }
             .navigationTitle("Playlists")
             .searchable(text: $searchText)
+            .onAppear {
+                sortMode = getFolderSortMode(for: nil)
+                updateCombinedItemsCache()
+            }
+            .onChange(of: searchText) { _, _ in updateCombinedItemsCache() }
+            .onChange(of: allFolders.count) { _, _ in updateCombinedItemsCache() }
+            .onChange(of: allPlaylists.count) { _, _ in updateCombinedItemsCache() }
+            .onChange(of: sortMode) { _, newMode in
+                setFolderSortMode(for: nil, mode: newMode)
+                updateCombinedItemsCache()
+            }
             .toolbar {
-                ToolbarItemGroup(placement: .navigationBarTrailing) {
-                    // 2. Add the Refresh Button here
-                    Button {
-                        // 1. Wipe the current duplicates from the database
-                        // This removes all 'Song' entries so the sync starts fresh
-                        try? modelContext.delete(model: Song.self)
-                        
-                        // 2. Simply trigger the fresh sync logic
-                        // Your syncLocalFiles logic will now see 0 existing songs and re-import them correctly
-                        onRefresh()
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                            .foregroundColor(.green)
-                    }
-
-                    EditButton().foregroundColor(.green)
-                    
-                    Button { showingAddOptions = true } label: {
-                        Image(systemName: "plus.circle.fill").foregroundColor(.green)
+                ToolbarItem(placement: .navigationBarLeading) {
+                    if isSelectMode {
+                        Button("Done") {
+                            isSelectMode = false
+                            selectedItems.removeAll()
+                        }
+                        .foregroundColor(.yellow)
+                    } else {
+                        Button { onOpenSettings?() } label: {
+                            Image(systemName: "gearshape")
+                                .foregroundColor(.yellow)
+                        }
                     }
                 }
-            }
-            .confirmationDialog("Add New", isPresented: $showingAddOptions) {
-                Button("New Folder") { isCreatingFolder = true; showingNameAlert = true }
-                Button("New Playlist") { isCreatingFolder = false; showingNameAlert = true }
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
+                    if isSelectMode {
+                        // Delete selected button
+                        Button {
+                            deleteSelectedItems()
+                        } label: {
+                            Image(systemName: "trash")
+                                .foregroundColor(selectedItems.isEmpty ? .gray : .red)
+                        }
+                        .disabled(selectedItems.isEmpty)
+                    } else {
+                        // Sort menu
+                        Menu {
+                            ForEach(FolderSortMode.allCases, id: \.self) { mode in
+                                Button {
+                                    sortMode = mode
+                                } label: {
+                                    HStack {
+                                        Text(mode.rawValue)
+                                        if sortMode == mode { Image(systemName: "checkmark") }
+                                    }
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "arrow.up.arrow.down")
+                                .foregroundColor(.yellow)
+                        }
+
+                        // Refresh Button
+                        Button {
+                            try? modelContext.delete(model: Song.self)
+                            onRefresh()
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                                .foregroundColor(.yellow)
+                        }
+
+                        // Select button
+                        Button {
+                            isSelectMode = true
+                        } label: {
+                            Image(systemName: "checkmark.circle")
+                                .foregroundColor(.yellow)
+                        }
+
+                        if sortMode == .custom {
+                            EditButton().foregroundColor(.yellow)
+                        }
+
+                        Menu {
+                            Button("New Folder") {
+                                isCreatingFolder = true
+                                targetParentFolder = nil
+                                showingNameAlert = true
+                            }
+                            Menu("New Playlist") {
+                                Button("At top level") {
+                                    isCreatingFolder = false
+                                    targetParentFolder = nil
+                                    newItemName = ""
+                                    showingNameAlert = true
+                                }
+                                let topFolders = allFolders.filter { $0.modelContext != nil && $0.parent == nil }
+                                ForEach(topFolders.sorted(by: { $0.sortOrder < $1.sortOrder }), id: \.persistentModelID) { folder in
+                                    newPlaylistFolderSubmenu(folder: folder)
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "plus.circle.fill").foregroundColor(.yellow)
+                        }
+                    }
+                }
             }
             .alert("Rename", isPresented: $isRenaming) {
                 TextField("Name", text: $renameText)
@@ -113,12 +359,7 @@ struct PlaylistsTab: View {
             .alert(isCreatingFolder ? "New Folder" : "New Playlist", isPresented: $showingNameAlert) {
                 TextField("Name", text: $newItemName)
                 Button("Create") {
-                    if isCreatingFolder {
-                        modelContext.insert(Folder(name: newItemName))
-                    } else {
-                        modelContext.insert(Playlist(name: newItemName))
-                    }
-                    newItemName = ""
+                    createNewItem()
                 }
                 Button("Cancel", role: .cancel) {}
             }
@@ -127,71 +368,156 @@ struct PlaylistsTab: View {
 
     @ViewBuilder
     private func itemRow(for item: PlaylistItem) -> some View {
+        let isSelected = selectedItems.contains(item.id)
+
         switch item {
         case .folder(let folder):
-            NavigationLink(destination: FolderDetailView(folder: folder, playerManager: playerManager, allSongs: allSongs)) {
-                HStack(spacing: 12) {
-                    // Folder icon
-                    ZStack {
-                        Color.yellow.opacity(0.2)
-                        Image(systemName: "folder.fill")
-                            .foregroundColor(.yellow)
+            if isSelectMode {
+                Button {
+                    toggleSelection(item.id)
+                } label: {
+                    HStack(spacing: 12) {
+                        // Selection indicator
+                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                            .foregroundColor(isSelected ? .yellow : .gray)
                             .font(.title2)
-                    }
-                    .frame(width: 60, height: 60)
-                    .cornerRadius(8)
-                    
-                    Text(folder.name)
-                        .font(.body)
-                    
-                    Spacer()
-                }
-                .padding(.vertical, 4)
-            }
-            .contextMenu {
-                Button("Rename") {
-                    renameText = folder.name
-                    folderToRename = folder
-                    isRenaming = true
-                }
-                Button("Delete", role: .destructive) { modelContext.delete(folder) }
-            }
-        case .playlist(let playlist):
-            NavigationLink(destination: PlaylistDetailView(playlist: playlist, playerManager: playerManager, allSongs: allSongs)) {
-                HStack(spacing: 12) {
-                    // Playlist artwork mosaic
-                    PlaylistArtworkView(playlist: playlist)
+
+                        // Folder icon
+                        ZStack {
+                            Color.yellow.opacity(0.2)
+                            Image(systemName: "folder.fill")
+                                .foregroundColor(.yellow)
+                                .font(.title2)
+                        }
                         .frame(width: 60, height: 60)
                         .cornerRadius(8)
-                    
-                    Text(playlist.name)
-                        .font(.body)
-                    
-                    Spacer()
+
+                        Text(folder.name)
+                            .font(.body)
+                            .foregroundColor(.primary)
+
+                        Spacer()
+                    }
+                    .padding(.vertical, 4)
                 }
-                .padding(.vertical, 4)
+            } else {
+                NavigationLink(destination: FolderDetailView(folder: folder, playerManager: playerManager, allSongs: allSongs)) {
+                    HStack(spacing: 12) {
+                        // Folder icon
+                        ZStack {
+                            Color.yellow.opacity(0.2)
+                            Image(systemName: "folder.fill")
+                                .foregroundColor(.yellow)
+                                .font(.title2)
+                        }
+                        .frame(width: 60, height: 60)
+                        .cornerRadius(8)
+
+                        Text(folder.name)
+                            .font(.body)
+
+                        Spacer()
+                    }
+                    .padding(.vertical, 4)
+                }
+                .contextMenu {
+                    Button("Rename") {
+                        renameText = folder.name
+                        folderToRename = folder
+                        isRenaming = true
+                    }
+                    Button("Delete", role: .destructive) { modelContext.delete(folder) }
+                }
             }
-            .contextMenu {
-                Button("Rename") {
-                    renameText = playlist.name
-                    playlistToRename = playlist
-                    isRenaming = true
+        case .playlist(let playlist):
+            if isSelectMode {
+                Button {
+                    toggleSelection(item.id)
+                } label: {
+                    HStack(spacing: 12) {
+                        // Selection indicator
+                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                            .foregroundColor(isSelected ? .yellow : .gray)
+                            .font(.title2)
+
+                        // Playlist artwork mosaic
+                        PlaylistArtworkView(playlist: playlist)
+                            .frame(width: 60, height: 60)
+                            .cornerRadius(8)
+
+                        Text(playlist.name)
+                            .font(.body)
+                            .foregroundColor(.primary)
+
+                        Spacer()
+                    }
+                    .padding(.vertical, 4)
                 }
-                Menu("Move to Folder") {
-                    ForEach(allFolders.filter { $0.modelContext != nil && $0.parent == nil }) { folder in
-                        Button(folder.name) {
-                            playlist.parentFolder = folder
+            } else {
+                NavigationLink(destination: PlaylistDetailView(playlist: playlist, playerManager: playerManager, allSongs: allSongs)) {
+                    HStack(spacing: 12) {
+                        // Playlist artwork mosaic
+                        PlaylistArtworkView(playlist: playlist)
+                            .frame(width: 60, height: 60)
+                            .cornerRadius(8)
+
+                        Text(playlist.name)
+                            .font(.body)
+
+                        Spacer()
+                    }
+                    .padding(.vertical, 4)
+                }
+                .contextMenu {
+                    Button("Rename") {
+                        renameText = playlist.name
+                        playlistToRename = playlist
+                        isRenaming = true
+                    }
+                    Menu("Move to Folder") {
+                        Button("Root (No Folder)") {
+                            playlist.parentFolder = nil
                             try? modelContext.save()
+                            updateCombinedItemsCache()
+                        }
+                        let topFolders = allFolders.filter { $0.modelContext != nil && $0.parent == nil }
+                        ForEach(topFolders.sorted(by: { $0.sortOrder < $1.sortOrder }), id: \.persistentModelID) { folder in
+                            movePlaylistFolderSubmenu(folder: folder, playlist: playlist)
                         }
                     }
+                    Button("Delete", role: .destructive) { modelContext.delete(playlist) }
                 }
-                Button("Delete", role: .destructive) { modelContext.delete(playlist) }
             }
         }
     }
+
+    private func toggleSelection(_ id: PersistentIdentifier) {
+        if selectedItems.contains(id) {
+            selectedItems.remove(id)
+        } else {
+            selectedItems.insert(id)
+        }
+    }
+
+    private func deleteSelectedItems() {
+        for item in cachedCombinedItems {
+            if selectedItems.contains(item.id) {
+                switch item {
+                case .folder(let folder):
+                    modelContext.delete(folder)
+                case .playlist(let playlist):
+                    modelContext.delete(playlist)
+                }
+            }
+        }
+        try? modelContext.save()
+        selectedItems.removeAll()
+        isSelectMode = false
+        updateCombinedItemsCache()
+    }
     
     private func moveItems(from source: IndexSet, to destination: Int) {
-        var items = combinedItems
+        var items = cachedCombinedItems
         items.move(fromOffsets: source, toOffset: destination)
         
         for (index, item) in items.enumerated() {
@@ -203,6 +529,7 @@ struct PlaylistsTab: View {
             }
         }
         try? modelContext.save()
+        updateCombinedItemsCache()
     }
 }
 
@@ -211,7 +538,7 @@ struct PlaylistArtworkView: View {
     let playlist: Playlist
     
     var songs: [Song] {
-        playlist.songs ?? []
+        orderedPlaylistSongs(playlist: playlist, songs: playlist.songs ?? [])
     }
     
     // Count unique albums

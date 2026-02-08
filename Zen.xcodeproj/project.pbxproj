@@ -6,8 +6,43 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		CADC5E992F296C3A004AF39B /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CADC5E982F296C3A004AF39B /* WidgetKit.framework */; };
+		CADC5E9B2F296C3A004AF39B /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CADC5E9A2F296C3A004AF39B /* SwiftUI.framework */; };
+		CADC5EAA2F296C3C004AF39B /* ZenWidgetExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CADC5E962F296C3A004AF39B /* ZenWidgetExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		CAF9C5C62F219C3400E72B8F /* Telegraph in Frameworks */ = {isa = PBXBuildFile; productRef = CAF9C5C52F219C3400E72B8F /* Telegraph */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		CADC5EA82F296C3C004AF39B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = CA5F6A882F08D5FA00B51BC6 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = CADC5E952F296C3A004AF39B;
+			remoteInfo = ZenWidgetExtension;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		CADC5EAB2F296C3C004AF39B /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				CADC5EAA2F296C3C004AF39B /* ZenWidgetExtension.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		CA5F6A902F08D5FA00B51BC6 /* Zen.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Zen.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		CADC5E962F296C3A004AF39B /* ZenWidgetExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ZenWidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		CADC5E982F296C3A004AF39B /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
+		CADC5E9A2F296C3A004AF39B /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
+		CADC5EB12F296F25004AF39B /* ZenWidgetExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ZenWidgetExtension.entitlements; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -17,6 +52,13 @@
 				Info.plist,
 			);
 			target = CA5F6A8F2F08D5FA00B51BC6 /* Zen */;
+		};
+		CADC5EAF2F296C3C004AF39B /* Exceptions for "ZenWidget" folder in "ZenWidgetExtension" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = CADC5E952F296C3A004AF39B /* ZenWidgetExtension */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
@@ -29,6 +71,14 @@
 			path = Zen;
 			sourceTree = "<group>";
 		};
+		CADC5E9C2F296C3A004AF39B /* ZenWidget */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				CADC5EAF2F296C3C004AF39B /* Exceptions for "ZenWidget" folder in "ZenWidgetExtension" target */,
+			);
+			path = ZenWidget;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -36,6 +86,16 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				CAF9C5C62F219C3400E72B8F /* Telegraph in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CADC5E932F296C3A004AF39B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CADC5E9B2F296C3A004AF39B /* SwiftUI.framework in Frameworks */,
+				CADC5E992F296C3A004AF39B /* WidgetKit.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -45,7 +105,10 @@
 		CA5F6A872F08D5FA00B51BC6 = {
 			isa = PBXGroup;
 			children = (
+				CADC5EB12F296F25004AF39B /* ZenWidgetExtension.entitlements */,
 				CA5F6A922F08D5FA00B51BC6 /* Zen */,
+				CADC5E9C2F296C3A004AF39B /* ZenWidget */,
+				CADC5E972F296C3A004AF39B /* Frameworks */,
 				CA5F6A912F08D5FA00B51BC6 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -54,8 +117,18 @@
 			isa = PBXGroup;
 			children = (
 				CA5F6A902F08D5FA00B51BC6 /* Zen.app */,
+				CADC5E962F296C3A004AF39B /* ZenWidgetExtension.appex */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		CADC5E972F296C3A004AF39B /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				CADC5E982F296C3A004AF39B /* WidgetKit.framework */,
+				CADC5E9A2F296C3A004AF39B /* SwiftUI.framework */,
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -68,20 +141,45 @@
 				CA5F6A8C2F08D5FA00B51BC6 /* Sources */,
 				CA5F6A8D2F08D5FA00B51BC6 /* Frameworks */,
 				CA5F6A8E2F08D5FA00B51BC6 /* Resources */,
+				CADC5EAB2F296C3C004AF39B /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				CADC5EA92F296C3C004AF39B /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				CA5F6A922F08D5FA00B51BC6 /* Zen */,
 			);
 			name = Zen;
 			packageProductDependencies = (
+				CAF9C5C52F219C3400E72B8F /* Telegraph */,
 			);
 			productName = Zen;
 			productReference = CA5F6A902F08D5FA00B51BC6 /* Zen.app */;
 			productType = "com.apple.product-type.application";
+		};
+		CADC5E952F296C3A004AF39B /* ZenWidgetExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CADC5EAE2F296C3C004AF39B /* Build configuration list for PBXNativeTarget "ZenWidgetExtension" */;
+			buildPhases = (
+				CADC5E922F296C3A004AF39B /* Sources */,
+				CADC5E932F296C3A004AF39B /* Frameworks */,
+				CADC5E942F296C3A004AF39B /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				CADC5E9C2F296C3A004AF39B /* ZenWidget */,
+			);
+			name = ZenWidgetExtension;
+			packageProductDependencies = (
+			);
+			productName = ZenWidgetExtension;
+			productReference = CADC5E962F296C3A004AF39B /* ZenWidgetExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -96,6 +194,9 @@
 					CA5F6A8F2F08D5FA00B51BC6 = {
 						CreatedOnToolsVersion = 26.2;
 					};
+					CADC5E952F296C3A004AF39B = {
+						CreatedOnToolsVersion = 26.2;
+					};
 				};
 			};
 			buildConfigurationList = CA5F6A8B2F08D5FA00B51BC6 /* Build configuration list for PBXProject "Zen" */;
@@ -107,18 +208,29 @@
 			);
 			mainGroup = CA5F6A872F08D5FA00B51BC6;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				CAF9C5C42F219C3400E72B8F /* XCRemoteSwiftPackageReference "Telegraph" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = CA5F6A912F08D5FA00B51BC6 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
 				CA5F6A8F2F08D5FA00B51BC6 /* Zen */,
+				CADC5E952F296C3A004AF39B /* ZenWidgetExtension */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		CA5F6A8E2F08D5FA00B51BC6 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CADC5E942F296C3A004AF39B /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -135,7 +247,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		CADC5E922F296C3A004AF39B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		CADC5EA92F296C3C004AF39B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = CADC5E952F296C3A004AF39B /* ZenWidgetExtension */;
+			targetProxy = CADC5EA82F296C3C004AF39B /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		CA5F6A992F08D5FC00B51BC6 /* Debug */ = {
@@ -190,7 +317,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
@@ -247,7 +374,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
@@ -263,6 +390,8 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+				CODE_SIGN_ENTITLEMENTS = Zen/Zen.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = L5DUG3BYC8;
@@ -270,19 +399,21 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Zen/Info.plist;
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "This app needs access to the local network to transfer files between your computer and iPhone using Telegraph.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
-				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = Test.Zen;
+				PRODUCT_BUNDLE_IDENTIFIER = com.williambarrios.zen;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
@@ -299,6 +430,8 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+				CODE_SIGN_ENTITLEMENTS = Zen/Zen.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = L5DUG3BYC8;
@@ -306,22 +439,88 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Zen/Info.plist;
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "This app needs access to the local network to transfer files between your computer and iPhone using Telegraph.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
-				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = Test.Zen;
+				PRODUCT_BUNDLE_IDENTIFIER = com.williambarrios.zen;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		CADC5EAC2F296C3C004AF39B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
+				CODE_SIGN_ENTITLEMENTS = ZenWidgetExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = L5DUG3BYC8;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ZenWidget/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = ZenWidget;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.williambarrios.zen.ZenWidget;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		CADC5EAD2F296C3C004AF39B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
+				CODE_SIGN_ENTITLEMENTS = ZenWidgetExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = L5DUG3BYC8;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ZenWidget/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = ZenWidget;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.williambarrios.zen.ZenWidget;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
@@ -350,7 +549,35 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		CADC5EAE2F296C3C004AF39B /* Build configuration list for PBXNativeTarget "ZenWidgetExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CADC5EAC2F296C3C004AF39B /* Debug */,
+				CADC5EAD2F296C3C004AF39B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		CAF9C5C42F219C3400E72B8F /* XCRemoteSwiftPackageReference "Telegraph" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/Building42/Telegraph";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.40.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		CAF9C5C52F219C3400E72B8F /* Telegraph */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CAF9C5C42F219C3400E72B8F /* XCRemoteSwiftPackageReference "Telegraph" */;
+			productName = Telegraph;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = CA5F6A882F08D5FA00B51BC6 /* Project object */;
 }

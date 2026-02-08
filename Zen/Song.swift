@@ -4,13 +4,14 @@ import SwiftData
 @Model
 class Folder {
     var name: String
-    var sortOrder: Int // Add this line
-    
+    var sortOrder: Int
+    var createdAt: Date = Date()
+
     @Relationship(deleteRule: .cascade, inverse: \Folder.parent)
     var subFolders: [Folder] = []
-    
+
     var parent: Folder?
-    
+
     @Relationship(deleteRule: .cascade, inverse: \Playlist.parentFolder)
     var playlists: [Playlist] = []
 
@@ -25,11 +26,12 @@ class Folder {
 final class Playlist {
     var name: String
     var sortOrder: Int
-    
+    var createdAt: Date = Date()
+
     // 1. Explicitly define the relationship and the inverse
     @Relationship(inverse: \Song.playlists)
     var songs: [Song]? = []
-    
+
     var parentFolder: Folder?
 
     init(name: String, sortOrder: Int = 0) {
@@ -48,6 +50,8 @@ final class Song: Identifiable {
     var title: String = "Unknown Title"
     var artist: String = "Unknown Artist"
     var album: String = "Unknown Album"
+    /// When true, song is hidden from the Library tab only; still appears in Artists, Albums, Playlists, etc.
+    var hiddenFromLibrary: Bool = false
     
     @Relationship(deleteRule: .cascade)
     var artworkContainer: SongArtwork?
@@ -70,5 +74,39 @@ class SongArtwork {
     
     init(data: Data?) {
         self.data = data
+    }
+}
+
+/// History log entry for settings: added/deleted from library, added/removed from playlists.
+@Model
+final class HistoryEntry {
+    var date: Date
+    var action: String // "added_to_library", "deleted_from_library", "added_to_playlist", "removed_from_playlist"
+    var songTitle: String
+    var songArtist: String
+    var playlistName: String?
+    
+    init(date: Date = .now, action: String, songTitle: String, songArtist: String, playlistName: String? = nil) {
+        self.date = date
+        self.action = action
+        self.songTitle = songTitle
+        self.songArtist = songArtist
+        self.playlistName = playlistName
+    }
+}
+
+/// One play event for "Wrapped" style stats. Reset scope: only current calendar year is retained.
+@Model
+final class PlayRecord {
+    var date: Date
+    var songURL: URL
+    var songTitle: String
+    var songArtist: String
+    
+    init(date: Date = .now, songURL: URL, songTitle: String, songArtist: String) {
+        self.date = date
+        self.songURL = songURL
+        self.songTitle = songTitle
+        self.songArtist = songArtist
     }
 }

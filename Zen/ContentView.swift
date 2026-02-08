@@ -9,6 +9,7 @@ import UIKit
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @StateObject var playerManager = PlayerManager()
+    @StateObject private var serverManager = TelegraphServerManager()
     @Query(sort: \Song.title) private var allSongs: [Song]
     @Query(sort: \Playlist.name) private var playlists: [Playlist]
     
@@ -22,6 +23,91 @@ struct ContentView: View {
     @State private var songToDelete: Song? = nil
     @State private var artistToNavigate: String? = nil
     @State private var albumToNavigate: String? = nil
+    @State private var showSettings = false
+    @State private var hasFixedStaleSongURLsThisLaunch = false
+    @State private var keyboardHeight: CGFloat = 0
+
+    // Timer to check for widget actions while app is active
+    private let widgetActionTimer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
+
+    // MARK: - Widget Deep Link Handling
+    private func checkForPendingWidgetAction() {
+        guard let sharedDefaults = UserDefaults(suiteName: "group.com.williambarrios.zen") else {
+            #if DEBUG
+            print("Widget: Failed to access shared UserDefaults")
+            #endif
+            return
+        }
+        if let action = sharedDefaults.string(forKey: "widgetAction"),
+           let timestamp = sharedDefaults.object(forKey: "widgetActionTimestamp") as? TimeInterval {
+            let now = Date().timeIntervalSince1970
+            if now - timestamp < 10.0 { // Process actions from last 10 seconds
+                #if DEBUG
+                print("Widget: Found pending action '\(action)' from \(now - timestamp) seconds ago")
+                #endif
+                // Clear the action
+                sharedDefaults.removeObject(forKey: "widgetAction")
+                sharedDefaults.removeObject(forKey: "widgetActionTimestamp")
+
+                // Handle the action immediately
+                handleWidgetAction(action)
+            } else {
+                #if DEBUG
+                print("Widget: Action '\(action)' is too old (\(now - timestamp) seconds)")
+                #endif
+            }
+        } else {
+            #if DEBUG
+            print("Widget: No pending action found")
+            #endif
+        }
+    }
+    
+    private func handleWidgetAction(_ action: String) {
+        #if DEBUG
+        print("Widget: Handling action '\(action)'")
+        #endif
+        switch action {
+        case "toggle":
+            #if DEBUG
+            print("Widget: Calling togglePauseOrStartRandom with \(allSongs.count) songs")
+            #endif
+            playerManager.togglePauseOrStartRandom(allSongs: allSongs)
+        case "next":
+            playerManager.nextTrack()
+        case "previous":
+            playerManager.previousTrack()
+        default:
+            #if DEBUG
+            print("Widget: Unknown action '\(action)'")
+            #endif
+            break
+        }
+    }
+    
+    /// After an app update the container path can change; stored song URLs may point to the old path.
+    /// Fix any song whose file isn't at the stored path by resolving from the current Documents directory.
+    /// Run once per launch so playback works without the user having to hit Refresh.
+    private func fixStaleSongURLsIfNeeded() {
+        let fileManager = FileManager.default
+        guard let docsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+        
+        var didFixAny = false
+        for song in allSongs {
+            let path = song.url.path
+            if fileManager.fileExists(atPath: path) { continue }
+            
+            let filename = song.url.lastPathComponent
+            let resolvedPath = docsURL.appendingPathComponent(filename).path
+            if fileManager.fileExists(atPath: resolvedPath) {
+                song.url = URL(fileURLWithPath: resolvedPath)
+                didFixAny = true
+            }
+        }
+        if didFixAny {
+            try? modelContext.save()
+        }
+    }
     
     // MARK: - Delete Song Function
     func confirmDelete(_ song: Song) {
@@ -57,14 +143,20 @@ struct ContentView: View {
         if fileManager.fileExists(atPath: fileURL.path) {
             do {
                 try fileManager.removeItem(at: fileURL)
+                #if DEBUG
                 print("Successfully deleted file: \(fileURL.lastPathComponent)")
+                #endif
             } catch {
+                #if DEBUG
                 print("Error deleting file \(fileURL.lastPathComponent): \(error.localizedDescription)")
+                #endif
                 // Continue with database deletion even if file delete fails
                 // (file might have been moved/deleted externally)
             }
         } else {
+            #if DEBUG
             print("File does not exist at path: \(fileURL.path), removing from database only")
+            #endif
         }
         
         // 4. Remove from all playlists (SwiftData relationship will handle this automatically)
@@ -72,17 +164,21 @@ struct ContentView: View {
         if let playlists = song.playlists {
             for playlist in playlists {
                 playlist.songs?.removeAll { $0.id == song.id }
+                removeSongFromPlaylistOrder(playlist: playlist, song: song)
             }
         }
         
-        // 5. Delete from SwiftData
+        // 5. Record history then delete from SwiftData
+        recordHistory(context: modelContext, action: "deleted_from_library", songTitle: song.title, songArtist: song.artist)
         modelContext.delete(song)
         
         // 6. Save the context
         do {
             try modelContext.save()
         } catch {
+            #if DEBUG
             print("Error saving after delete: \(error.localizedDescription)")
+            #endif
         }
     }
     
@@ -141,7 +237,9 @@ struct ContentView: View {
                 includingPropertiesForKeys: resourceKeys,
                 options: [.skipsHiddenFiles],
                 errorHandler: { url, error -> Bool in
+                    #if DEBUG
                     print("Error accessing \(url): \(error.localizedDescription)")
+                    #endif
                     return true // Continue on error
                 }
             )
@@ -247,6 +345,68 @@ struct ContentView: View {
         }
     }
 
+    /// Import only the given URLs (e.g. from server upload). No full-disk scan.
+    private func importUploadedFilesOnly(_ urls: [URL]) {
+        let container = modelContext.container
+        Task { @MainActor in
+            isSyncing = true
+            syncProgress = 0
+            syncTotal = 0
+            currentlySyncingName = "Checking uploaded files..."
+        }
+
+        Task(priority: .userInitiated) {
+            defer {
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    withAnimation(.spring()) { self.isSyncing = false }
+                }
+            }
+
+            let existingURLs = await MainActor.run {
+                Set(allSongs.map { $0.url.standardized })
+            }
+            let newURLs = urls.filter { !existingURLs.contains($0.standardized) }
+
+            await MainActor.run {
+                if newURLs.isEmpty {
+                    currentlySyncingName = "All \(urls.count) file(s) already in library"
+                    syncTotal = 0
+                    syncProgress = 0
+                } else {
+                    syncTotal = newURLs.count
+                    syncProgress = 0
+                    currentlySyncingName = "Importing \(newURLs.count) new file(s)..."
+                }
+            }
+
+            if newURLs.isEmpty {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                return
+            }
+
+            let importer = SongImporter(modelContainer: container)
+            await importer.importSongs(from: newURLs) { current, total in
+                Task { @MainActor in
+                    self.syncProgress = Double(current)
+                    self.syncTotal = total
+                    if current > 0, current <= newURLs.count {
+                        self.currentlySyncingName = newURLs[current - 1].lastPathComponent
+                    } else if current == total, total > 0 {
+                        self.currentlySyncingName = "Import complete! (\(total) song\(total == 1 ? "" : "s"))"
+                    }
+                }
+            }
+
+            await MainActor.run {
+                syncProgress = Double(newURLs.count)
+                syncTotal = newURLs.count
+                currentlySyncingName = "Import complete! (\(newURLs.count) song\(newURLs.count == 1 ? "" : "s"))"
+            }
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+    }
+
     var body: some View {
         ZStack(alignment: .bottom) {
             // LAYER 1: The Main Navigation
@@ -255,10 +415,12 @@ struct ContentView: View {
                 NavigationStack {
                     LibraryTab(
                         playerManager: playerManager,
+                        serverManager: serverManager,
                         selectedTab: $selectedTab,
                         searchQuery: $searchQuery,
                         artistToNavigate: $artistToNavigate,
-                        albumToNavigate: $albumToNavigate
+                        albumToNavigate: $albumToNavigate,
+                        onOpenSettings: { showSettings = true }
                     )
                 }
                 .tag(0)
@@ -272,7 +434,8 @@ struct ContentView: View {
                         searchQuery: $searchQuery,
                         selectedTab: $selectedTab,
                         artistToNavigate: $artistToNavigate,
-                        albumToNavigate: $albumToNavigate
+                        albumToNavigate: $albumToNavigate,
+                        onOpenSettings: { showSettings = true }
                     )
                 }
                 .tag(1)
@@ -286,7 +449,8 @@ struct ContentView: View {
                         searchQuery: $searchQuery,
                         selectedTab: $selectedTab,
                         albumToNavigate: $albumToNavigate,
-                        artistToNavigate: $artistToNavigate
+                        artistToNavigate: $artistToNavigate,
+                        onOpenSettings: { showSettings = true }
                     )
                 }
                 .tag(2)
@@ -294,9 +458,12 @@ struct ContentView: View {
                 
                 // Tab 3: Playlists
                 NavigationStack {
-                    PlaylistsTab(playerManager: playerManager, allSongs: allSongs, onRefresh: {
-                        syncLocalFiles()
-                    })
+                    PlaylistsTab(
+                        playerManager: playerManager,
+                        allSongs: allSongs,
+                        onRefresh: { syncLocalFiles() },
+                        onOpenSettings: { showSettings = true }
+                    )
                 }
                 .tag(3)
                 .tabItem { Label("Playlists", systemImage: "music.note.house") }
@@ -313,6 +480,14 @@ struct ContentView: View {
                 importOverlayView
                     .zIndex(2)
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { notification in
+            if let frame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect {
+                keyboardHeight = frame.height
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            keyboardHeight = 0
         }
         .confirmationDialog(
             "Delete Song",
@@ -333,8 +508,75 @@ struct ContentView: View {
                 Text("Are you sure you want to delete \"\(song.title)\" by \(song.artist)? This will permanently delete the file from your device.")
             }
         }
+        .sheet(isPresented: $showSettings) {
+            SettingsView(serverManager: serverManager, playerManager: playerManager)
+        }
         // This places the Toast at the absolute top of the visual stack
         .modifier(GlobalToastOverlay(playerManager: playerManager))
+        // Set model container for server manager
+        .onAppear {
+            serverManager.setModelContainer(modelContext.container)
+            playerManager.onPlayRecord = { [modelContext] song in
+                recordPlay(context: modelContext, song: song)
+            }
+            // Check for pending widget actions when app appears (with delay to ensure everything is ready)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                self.checkForPendingWidgetAction()
+            }
+            // After an app update the container path can change; fix stale song URLs once per launch
+            // so playback works without the user having to hit Refresh (which wipes and re-imports).
+            if !hasFixedStaleSongURLsThisLaunch {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    fixStaleSongURLsIfNeeded()
+                    hasFixedStaleSongURLsThisLaunch = true
+                }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ZenWidgetAction"))) { notification in
+            if let action = notification.userInfo?["action"] as? String {
+                #if DEBUG
+                print("Widget: ContentView received ZenWidgetAction notification for '\(action)'")
+                #endif
+                // Process immediately - PlayerManager should be ready
+                self.handleWidgetAction(action)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ZenWidgetToggleAction"))) { _ in
+            // Handle toggle action with access to allSongs immediately
+            #if DEBUG
+            print("Widget: ContentView received ZenWidgetToggleAction notification")
+            #endif
+            self.handleWidgetAction("toggle")
+        }
+        #if os(iOS)
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            // Check for pending widget actions when app becomes active
+            // Check immediately and also after a short delay to catch race conditions
+            #if DEBUG
+            print("Widget: ContentView - App became active, checking for pending actions")
+            #endif
+            self.checkForPendingWidgetAction()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                self.checkForPendingWidgetAction()
+            }
+        }
+        #endif
+        // Poll for widget actions while app is in foreground
+        .onReceive(widgetActionTimer) { _ in
+            self.checkForPendingWidgetAction()
+        }
+        // Auto-sync when files are uploaded via server
+        .onChange(of: serverManager.filesUploaded) { _, uploaded in
+            if uploaded {
+                let urls = serverManager.recentlyUploadedAudioURLs
+                serverManager.recentlyUploadedAudioURLs = []
+                if !urls.isEmpty {
+                    importUploadedFilesOnly(urls)
+                } else {
+                    syncLocalFiles()
+                }
+            }
+        }
         // -----------------------------
         .fullScreenCover(isPresented: $isPlayerExpanded) {
             if let currentSong = playerManager.currentSong {
@@ -403,7 +645,7 @@ struct ContentView: View {
                 }
             )
             .padding(.horizontal, 8)
-            .padding(.bottom, 54) // Align above Tab Bar
+            .padding(.bottom, keyboardHeight > 0 ? keyboardHeight * 0.03 + 1 : 54)
             .transition(AnyTransition.move(edge: .bottom).combined(with: .opacity))
         }
     }
@@ -433,7 +675,7 @@ struct ContentView: View {
             VStack(spacing: 20) {
                 ProgressView(value: syncProgress, total: Double(syncTotal))
                     .progressViewStyle(.linear)
-                    .tint(.green)
+                    .tint(.yellow)
                     .padding()
 
                 Text("Importing \(Int(syncProgress)) of \(syncTotal)")
@@ -470,7 +712,7 @@ struct IndexBar: View {
             ForEach(letters, id: \.self) { letter in
                 Text(letter)
                     .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(.green)
+                    .foregroundColor(.yellow)
                     .frame(width: 30, height: 16) // Height must match the calculation below
                     .contentShape(Rectangle())
             }
@@ -527,6 +769,7 @@ struct SongRow: View {
     var onGoToArtist: (() -> Void)? = nil
     var onGoToAlbum: (() -> Void)? = nil
     var onAddToPlaylist: (() -> Void)? = nil
+    var onRemoveFromPlaylist: (() -> Void)? = nil
     var onDelete: (() -> Void)? = nil
 
     var body: some View {
@@ -539,12 +782,12 @@ struct SongRow: View {
                     Text(song.title)
                         .font(.body)
                         .fontWeight(isCurrent ? .bold : .regular)
-                        .foregroundColor(isCurrent ? .green : .primary)
+                        .foregroundColor(isCurrent ? .yellow : .primary)
                         .lineLimit(1)
                     
                     Text(song.artist)
                         .font(.caption)
-                        .foregroundColor(isCurrent ? .green.opacity(0.8) : .secondary)
+                        .foregroundColor(isCurrent ? .yellow.opacity(0.8) : .secondary)
                         .lineLimit(1)
                 }
                 
@@ -552,7 +795,7 @@ struct SongRow: View {
                 
                 if isCurrent {
                     Image(systemName: "speaker.wave.3.fill")
-                        .foregroundColor(.green)
+                        .foregroundColor(.yellow)
                         .font(.caption)
                 }
             }
@@ -591,6 +834,12 @@ struct SongRow: View {
                 }
             }
             
+            if let onRemoveFromPlaylist = onRemoveFromPlaylist {
+                Button { onRemoveFromPlaylist() } label: {
+                    Label("Remove from Playlist", systemImage: "minus.circle")
+                }
+            }
+            
             if let onDelete = onDelete {
                 Button(role: .destructive) { onDelete() } label: {
                     Label("Delete", systemImage: "trash")
@@ -603,20 +852,38 @@ struct SongRow: View {
 struct LibraryTab: View {
     @Environment(\.modelContext) private var modelContext
     @ObservedObject var playerManager: PlayerManager
+    @ObservedObject var serverManager: TelegraphServerManager
     @Query(sort: \Song.title) var allSongs: [Song]
     @Query(sort: \Playlist.name) var allPlaylists: [Playlist]
     @Binding var selectedTab: Int
     @Binding var searchQuery: String
     @Binding var artistToNavigate: String?
     @Binding var albumToNavigate: String?
+    var onOpenSettings: (() -> Void)? = nil
     @State private var searchText = ""
     @State private var showQueueToast = false
     @State private var showPlaylistToast = false
     @State private var playlistToastMessage = ""
+    @State private var keyboardHeight: CGFloat = 0
     @State private var songToAddToPlaylist: Song?
     @State private var songToDelete: Song? = nil
     @State private var selectedArtist: ArtistNavigationItem? = nil
     @State private var selectedAlbum: AlbumNavigationItem? = nil
+    @State private var isSelectionMode = false
+    @State private var selectedSongIDs: Set<URL> = []
+    @State private var showHiddenSongs = false
+    
+    /// Cached visible list and count to avoid O(n) filter on every body evaluation (e.g. 6000+ songs).
+    @State private var cachedVisibleSongs: [Song] = []
+    @State private var cachedHiddenCount: Int = 0
+    @State private var searchDebounceTask: Task<Void, Never>?
+    @State private var allSongsDebounceTask: Task<Void, Never>?
+    
+    private func updateVisibleCache() {
+        let vis = allSongs.filter { !$0.hiddenFromLibrary }
+        cachedVisibleSongs = vis
+        cachedHiddenCount = allSongs.count - vis.count
+    }
     
     // Optimize for large libraries: cache computed properties
     @State private var cachedGroupedSongs: [String: [Song]] = [:]
@@ -653,14 +920,20 @@ struct LibraryTab: View {
         if fileManager.fileExists(atPath: fileURL.path) {
             do {
                 try fileManager.removeItem(at: fileURL)
+                #if DEBUG
                 print("Successfully deleted file: \(fileURL.lastPathComponent)")
+                #endif
             } catch {
+                #if DEBUG
                 print("Error deleting file \(fileURL.lastPathComponent): \(error.localizedDescription)")
+                #endif
                 // Continue with database deletion even if file delete fails
                 // (file might have been moved/deleted externally)
             }
         } else {
+            #if DEBUG
             print("File does not exist at path: \(fileURL.path), removing from database only")
+            #endif
         }
         
         // 4. Remove from all playlists (SwiftData relationship will handle this automatically)
@@ -668,17 +941,42 @@ struct LibraryTab: View {
         if let playlists = song.playlists {
             for playlist in playlists {
                 playlist.songs?.removeAll { $0.id == song.id }
+                removeSongFromPlaylistOrder(playlist: playlist, song: song)
             }
         }
         
-        // 5. Delete from SwiftData
+        // 5. Record history then delete from SwiftData
+        recordHistory(context: modelContext, action: "deleted_from_library", songTitle: song.title, songArtist: song.artist)
         modelContext.delete(song)
         
         // 6. Save the context
         do {
             try modelContext.save()
         } catch {
+            #if DEBUG
             print("Error saving after delete: \(error.localizedDescription)")
+            #endif
+        }
+    }
+    
+    private func bulkHideSelected() {
+        for id in selectedSongIDs {
+            if let song = allSongs.first(where: { $0.id == id }) {
+                song.hiddenFromLibrary = true
+            }
+        }
+        try? modelContext.save()
+        selectedSongIDs.removeAll()
+        isSelectionMode = false
+        updateVisibleCache()
+        processSongs(cachedVisibleSongs, searchText: searchText)
+    }
+    
+    private func toggleSelection(_ song: Song) {
+        if selectedSongIDs.contains(song.id) {
+            selectedSongIDs.remove(song.id)
+        } else {
+            selectedSongIDs.insert(song.id)
         }
     }
     
@@ -839,6 +1137,34 @@ struct LibraryTab: View {
             .tint(.red)
         }
     }
+    
+    @ViewBuilder
+    private func librarySongRowSelectable(song: Song) -> some View {
+        Button {
+            toggleSelection(song)
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: selectedSongIDs.contains(song.id) ? "checkmark.circle.fill" : "circle")
+                    .foregroundColor(selectedSongIDs.contains(song.id) ? .yellow : .secondary)
+                    .font(.title2)
+                SongArtworkView(song: song, size: 48)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(song.title)
+                        .font(.body)
+                        .foregroundColor(.primary)
+                    Text(song.artist)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+            }
+            .padding(.vertical, 4)
+            .padding(.leading, 8)
+            .padding(.trailing, searchText.isEmpty ? 35 : 8)
+        }
+        .buttonStyle(.plain)
+        .listRowBackground(Color.clear)
+    }
 
     // MARK: - Body
 
@@ -847,7 +1173,7 @@ struct LibraryTab: View {
             ScrollViewReader { proxy in
                 ZStack {
                     List {
-                        Text("\(allSongs.count) Songs")
+                        Text("\(cachedVisibleSongs.count) Songs")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                             .listRowBackground(Color.clear)
@@ -859,11 +1185,15 @@ struct LibraryTab: View {
                         } else {
                             ForEach(sectionHeaders, id: \.self) { key in
                                 Section(header: Text(key)
-                                    .foregroundColor(.green)
+                                    .foregroundColor(.yellow)
                                     .font(.headline)
                                     .id(key)) {
                                     ForEach(groupedSongs[key] ?? []) { song in
-                                        songRowView(song: song)
+                                        if isSelectionMode {
+                                            librarySongRowSelectable(song: song)
+                                        } else {
+                                            songRowView(song: song)
+                                        }
                                     }
                                 }
                             }
@@ -898,42 +1228,103 @@ struct LibraryTab: View {
                         VStack {
                             Spacer()
                             playlistToastView
-                                .padding(.bottom, 90)
+                                .padding(.bottom, 90 + keyboardHeight)
                         }
                         .zIndex(100)
                         .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity), removal: .opacity))
                     }
                 }
+                .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { notification in
+                    if let frame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect {
+                        keyboardHeight = frame.height
+                    }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+                    keyboardHeight = 0
+                }
                 .navigationTitle("Library")
                 .searchable(text: $searchText)
                 .onAppear {
-                    // Initial processing
+                    updateVisibleCache()
+                    // Initial processing (only visible songs in Library tab)
                     if cachedGroupedSongs.isEmpty {
-                        processSongs(allSongs, searchText: searchText)
+                        processSongs(cachedVisibleSongs, searchText: searchText)
                     }
-                    // MEMORY OPTIMIZATION: Don't duplicate song data in playerManager
-                    // The playerManager will use the allSongs array directly when needed
                 }
                 .onChange(of: allSongs) { oldValue, newValue in
-                    // Reprocess when songs change
-                    processSongs(newValue, searchText: searchText)
-                    // MEMORY OPTIMIZATION: Don't duplicate song data
+                    updateVisibleCache()
+                    allSongsDebounceTask?.cancel()
+                    if cachedGroupedSongs.isEmpty {
+                        processSongs(cachedVisibleSongs, searchText: searchText)
+                    } else {
+                        allSongsDebounceTask = Task {
+                            try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
+                            guard !Task.isCancelled else { return }
+                            await MainActor.run {
+                                processSongs(cachedVisibleSongs, searchText: searchText)
+                            }
+                        }
+                    }
                 }
                 .onChange(of: searchText) { _, newValue in
                     searchQuery = newValue
-                    processSongs(allSongs, searchText: newValue)
+                    searchDebounceTask?.cancel()
+                    searchDebounceTask = Task {
+                        let value = newValue
+                        try? await Task.sleep(nanoseconds: 250_000_000) // 250ms
+                        guard !Task.isCancelled else { return }
+                        await MainActor.run {
+                            processSongs(cachedVisibleSongs, searchText: value)
+                        }
+                    }
                 }
                 .toolbar {
-                    ToolbarItem(placement: .navigationBarTrailing) {
+                    ToolbarItem(placement: .navigationBarLeading) {
                         Button {
-                            if let randomSong = allSongs.randomElement() {
-                                playerManager.play(song: randomSong, from: allSongs)
-                                // Enable shuffle and shuffle the queue
-                                playerManager.enableShuffleAndShuffleQueue()
-                            }
+                            onOpenSettings?()
                         } label: {
-                            Image(systemName: "shuffle")
-                                .foregroundColor(.green)
+                            Image(systemName: "gearshape")
+                                .foregroundColor(.yellow)
+                        }
+                    }
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        HStack(spacing: 12) {
+                            // Shuffle Button (from visible songs in Library)
+                            Button {
+                                if let randomSong = cachedVisibleSongs.randomElement() {
+                                    playerManager.play(song: randomSong, from: cachedVisibleSongs)
+                                    playerManager.enableShuffleAndShuffleQueue()
+                                }
+                            } label: {
+                                Image(systemName: "shuffle")
+                                    .foregroundColor(.yellow)
+                            }
+                            
+                            if !isSelectionMode {
+                                Button {
+                                    isSelectionMode = true
+                                    selectedSongIDs.removeAll()
+                                } label: {
+                                    Image(systemName: "checkmark.circle")
+                                        .foregroundColor(.yellow)
+                                }
+                            }
+                        }
+                    }
+                    if isSelectionMode {
+                        ToolbarItem(placement: .navigationBarLeading) {
+                            Button("Cancel") {
+                                isSelectionMode = false
+                                selectedSongIDs.removeAll()
+                            }
+                            .foregroundColor(.yellow)
+                        }
+                        ToolbarItem(placement: .navigationBarTrailing) {
+                            Button("Hide (\(selectedSongIDs.count))") {
+                                bulkHideSelected()
+                            }
+                            .foregroundColor(.yellow)
+                            .disabled(selectedSongIDs.isEmpty)
                         }
                     }
                 }
@@ -1007,7 +1398,6 @@ struct LibraryTab: View {
     }
 
     // MARK: - Extracted UI Components
-
     private var glassToastView: some View {
         HStack(spacing: 12) {
             Image(systemName: "text.badge.plus")
@@ -1051,13 +1441,124 @@ struct LibraryTab: View {
     }
 
     private func playContextualSong(_ song: Song) {
-        // Reconstruct sorted list from grouped songs for playback context
-        // MEMORY OPTIMIZATION: Only create the list when needed, don't store it
         let sortedList = sectionHeaders.flatMap { key in
             groupedSongs[key] ?? []
         }
-        // Pass the library directly without storing it
-        playerManager.play(song: song, from: sortedList.isEmpty ? allSongs : sortedList)
+        playerManager.play(song: song, from: sortedList.isEmpty ? cachedVisibleSongs : sortedList)
+    }
+}
+
+/// Lists songs hidden from the Library tab; supports select mode and bulk unhide.
+struct HiddenSongsView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \Song.title) private var allSongs: [Song]
+    var onUnhide: (() -> Void)? = nil
+    
+    @State private var isSelectionMode = false
+    @State private var selectedSongIDs: Set<URL> = []
+    
+    private var hiddenSongs: [Song] {
+        allSongs.filter { $0.hiddenFromLibrary }
+    }
+    
+    var body: some View {
+        List {
+            if hiddenSongs.isEmpty {
+                Text("No hidden songs.")
+                    .foregroundColor(.secondary)
+            } else {
+                ForEach(hiddenSongs, id: \.id) { song in
+                    if isSelectionMode {
+                        Button {
+                            toggleSelection(song)
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: selectedSongIDs.contains(song.id) ? "checkmark.circle.fill" : "circle")
+                                    .foregroundColor(selectedSongIDs.contains(song.id) ? .yellow : .secondary)
+                                    .font(.title2)
+                                SongArtworkView(song: song, size: 48)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(song.title)
+                                        .font(.body)
+                                        .foregroundColor(.primary)
+                                    Text(song.artist)
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                            }
+                            .padding(.vertical, 4)
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        HStack(spacing: 12) {
+                            SongArtworkView(song: song, size: 48)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(song.title)
+                                    .font(.body)
+                                Text(song.artist)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+            }
+        }
+        .navigationTitle("Hidden from library")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if hiddenSongs.isEmpty == false {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    if isSelectionMode {
+                        Button("Done") {
+                            isSelectionMode = false
+                            selectedSongIDs.removeAll()
+                        }
+                        .foregroundColor(.yellow)
+                    } else {
+                        Button {
+                            isSelectionMode = true
+                            selectedSongIDs.removeAll()
+                        } label: {
+                            Image(systemName: "checkmark.circle")
+                                .foregroundColor(.yellow)
+                        }
+                    }
+                }
+                if isSelectionMode {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        Button("Unhide (\(selectedSongIDs.count))") {
+                            bulkUnhideSelected()
+                        }
+                        .foregroundColor(.yellow)
+                        .disabled(selectedSongIDs.isEmpty)
+                    }
+                }
+            }
+        }
+    }
+    
+    private func toggleSelection(_ song: Song) {
+        if selectedSongIDs.contains(song.id) {
+            selectedSongIDs.remove(song.id)
+        } else {
+            selectedSongIDs.insert(song.id)
+        }
+    }
+    
+    private func bulkUnhideSelected() {
+        for id in selectedSongIDs {
+            if let song = allSongs.first(where: { $0.id == id }) {
+                song.hiddenFromLibrary = false
+            }
+        }
+        try? modelContext.save()
+        selectedSongIDs.removeAll()
+        isSelectionMode = false
+        onUnhide?()
     }
 }
 
@@ -1080,9 +1581,11 @@ struct ArtistsTab: View {
     @Binding var selectedTab: Int
     @Binding var artistToNavigate: String?
     @Binding var albumToNavigate: String?
+    var onOpenSettings: (() -> Void)? = nil
     @State private var songToAddToPlaylist: Song?
     @State private var showPlaylistToast = false
     @State private var playlistToastMessage = ""
+    @State private var keyboardHeight: CGFloat = 0
     @State private var selectedArtist: ArtistNavigationItem? = nil
     
     @StateObject private var viewModel = ArtistViewModel()
@@ -1098,6 +1601,14 @@ struct ArtistsTab: View {
                 }
             }
             .navigationTitle("Artists")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button { onOpenSettings?() } label: {
+                        Image(systemName: "gearshape")
+                            .foregroundColor(.yellow)
+                    }
+                }
+            }
             .searchable(text: $searchQuery)
             .sheet(item: $songToAddToPlaylist) { song in
                 PlaylistPickerSheet(
@@ -1119,11 +1630,19 @@ struct ArtistsTab: View {
                     VStack {
                         Spacer()
                         playlistToastView
-                            .padding(.bottom, 90)
+                            .padding(.bottom, 90 + keyboardHeight)
                     }
                     .zIndex(100)
                     .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity), removal: .opacity))
                 }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { notification in
+                if let frame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect {
+                    keyboardHeight = frame.height
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+                keyboardHeight = 0
             }
             .onChange(of: searchQuery) { _, newValue in
                 viewModel.update(with: allSongs, searchText: newValue)
@@ -1149,7 +1668,7 @@ struct ArtistsTab: View {
     private var artistsList: some View {
         List {
             ForEach(viewModel.headers, id: \.self) { key in
-                Section(header: Text(key).foregroundColor(.green).font(.headline)) {
+                Section(header: Text(key).foregroundColor(.yellow).font(.headline)) {
                     ForEach(viewModel.groupedArtists[key] ?? [], id: \.self) { artist in
                         Button {
                             selectedArtist = ArtistNavigationItem(artist: artist)
@@ -1463,14 +1982,20 @@ struct ArtistDetailView: View {
         if fileManager.fileExists(atPath: fileURL.path) {
             do {
                 try fileManager.removeItem(at: fileURL)
+                #if DEBUG
                 print("Successfully deleted file: \(fileURL.lastPathComponent)")
+                #endif
             } catch {
+                #if DEBUG
                 print("Error deleting file \(fileURL.lastPathComponent): \(error.localizedDescription)")
+                #endif
                 // Continue with database deletion even if file delete fails
                 // (file might have been moved/deleted externally)
             }
         } else {
+            #if DEBUG
             print("File does not exist at path: \(fileURL.path), removing from database only")
+            #endif
         }
         
         // 4. Remove from all playlists (SwiftData relationship will handle this automatically)
@@ -1478,17 +2003,21 @@ struct ArtistDetailView: View {
         if let playlists = song.playlists {
             for playlist in playlists {
                 playlist.songs?.removeAll { $0.id == song.id }
+                removeSongFromPlaylistOrder(playlist: playlist, song: song)
             }
         }
         
-        // 5. Delete from SwiftData
+        // 5. Record history then delete from SwiftData
+        recordHistory(context: modelContext, action: "deleted_from_library", songTitle: song.title, songArtist: song.artist)
         modelContext.delete(song)
         
         // 6. Save the context
         do {
             try modelContext.save()
         } catch {
+            #if DEBUG
             print("Error saving after delete: \(error.localizedDescription)")
+            #endif
         }
     }
 
@@ -1500,7 +2029,7 @@ struct ArtistDetailView: View {
                         selectedAlbum = AlbumNavigationItem(album: album)
                     } label: {
                         Text(album)
-                            .foregroundColor(.green)
+                            .foregroundColor(.yellow)
                             .font(.headline)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -1564,7 +2093,7 @@ struct ArtistDetailView: View {
                     }
                 } label: {
                     Image(systemName: "shuffle")
-                        .foregroundColor(.green)
+                        .foregroundColor(.yellow)
                 }
             }
         }
@@ -1580,9 +2109,11 @@ struct AlbumsTab: View {
     @Binding var selectedTab: Int
     @Binding var albumToNavigate: String?
     @Binding var artistToNavigate: String?
+    var onOpenSettings: (() -> Void)? = nil
     @State private var songToAddToPlaylist: Song?
     @State private var showPlaylistToast = false
     @State private var playlistToastMessage = ""
+    @State private var keyboardHeight: CGFloat = 0
     @State private var selectedAlbum: AlbumNavigationItem?
     
     @StateObject private var viewModel = AlbumViewModel()
@@ -1598,6 +2129,14 @@ struct AlbumsTab: View {
                 }
             }
             .navigationTitle("Albums")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button { onOpenSettings?() } label: {
+                        Image(systemName: "gearshape")
+                            .foregroundColor(.yellow)
+                    }
+                }
+            }
             .searchable(text: $searchQuery)
             .sheet(item: $songToAddToPlaylist) { song in
                 PlaylistPickerSheet(
@@ -1619,11 +2158,19 @@ struct AlbumsTab: View {
                     VStack {
                         Spacer()
                         playlistToastView
-                            .padding(.bottom, 90)
+                            .padding(.bottom, 90 + keyboardHeight)
                     }
                     .zIndex(100)
                     .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity), removal: .opacity))
                 }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { notification in
+                if let frame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect {
+                    keyboardHeight = frame.height
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+                keyboardHeight = 0
             }
             .onChange(of: searchQuery) { _, newValue in
                 viewModel.update(with: allSongs, searchText: newValue)
@@ -1649,7 +2196,7 @@ struct AlbumsTab: View {
     private var albumsList: some View {
         List {
             ForEach(viewModel.headers, id: \.self) { key in
-                Section(header: Text(key).foregroundColor(.green)) {
+                Section(header: Text(key).foregroundColor(.yellow)) {
                     // MEMORY OPTIMIZATION: Use LazyVStack-like behavior by limiting initial render
                     // For omega section, render in smaller chunks to prevent memory crash
                     if key == "Ω" {
@@ -1931,7 +2478,7 @@ struct AddSongsToPlaylistView: View {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Done") { dismiss() }
                         .fontWeight(.bold)
-                        .foregroundColor(.green)
+                        .foregroundColor(.yellow)
                 }
             }
         }
@@ -1965,8 +2512,12 @@ struct AddSongsToPlaylistView: View {
         // Use PersistentID for the most reliable SwiftData check
         if let index = playlist.songs?.firstIndex(where: { $0.persistentModelID == song.persistentModelID }) {
             playlist.songs?.remove(at: index)
+            removeSongFromPlaylistOrder(playlist: playlist, song: song)
+            recordHistory(context: modelContext, action: "removed_from_playlist", songTitle: song.title, songArtist: song.artist, playlistName: playlist.name)
         } else {
             playlist.songs?.append(song)
+            appendSongToPlaylistOrder(playlist: playlist, song: song)
+            recordHistory(context: modelContext, action: "added_to_playlist", songTitle: song.title, songArtist: song.artist, playlistName: playlist.name)
         }
         
         try? modelContext.save()
@@ -2006,7 +2557,7 @@ struct PlaylistSelectionRow: View {
 
                 Image(systemName: isAdded ? "checkmark.circle.fill" : "plus.circle")
                     .font(.title3)
-                    .foregroundColor(isAdded ? .green : .gray)
+                    .foregroundColor(isAdded ? .yellow : .gray)
                     .padding(.trailing, 4)
             }
             .padding(.vertical, 8)
@@ -2024,43 +2575,117 @@ struct PlaylistDetailView: View {
     var allSongs: [Song]
     @Environment(\.modelContext) private var modelContext
     @State private var songToDelete: Song? = nil
+    @State private var songToAddToPlaylist: Song? = nil
+    @State private var showPlaylistToast = false
+    @State private var playlistToastMessage = ""
+    @State private var sortMode: PlaylistSortMode = .custom
+    /// When sort is Custom, this holds the order so we can reorder and persist; synced from stored order when entering custom.
+    @State private var customOrderedSongs: [Song] = []
 
-    var body: some View {
-        // Use a local variable to simplify the List expression
-        let playlistSongs = playlist.songs ?? []
-        
-        List(playlistSongs) { song in
-            SongRow(
-                song: song,
-                isCurrent: playerManager.currentSong?.id == song.id,
-                action: {
-                    playContextualSong(song, in: playlistSongs)
-                },
-                onQueueNext: {
-                    playerManager.addToQueue(song: song, playNext: true)
-                },
-                onDelete: {
-                    confirmDelete(song)
+    private func displayedSongs() -> [Song] {
+        let raw = playlist.songs ?? []
+        switch sortMode {
+        case .aToZ:
+            return raw.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+        case .zToA:
+            return raw.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedDescending }
+        case .artist:
+            return raw.sorted {
+                let artistCompare = $0.artist.localizedCaseInsensitiveCompare($1.artist)
+                if artistCompare == .orderedSame {
+                    return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
                 }
-            )
-            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                Button {
-                    playerManager.addToQueue(song: song, playNext: true)
-                } label: {
-                    Label("Queue", systemImage: "text.badge.plus")
+                return artistCompare == .orderedAscending
+            }
+        case .album:
+            return raw.sorted {
+                let albumCompare = $0.album.localizedCaseInsensitiveCompare($1.album)
+                if albumCompare == .orderedSame {
+                    return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
                 }
-                .tint(.blue)
-                
-                Button(role: .destructive) {
-                    confirmDelete(song)
-                } label: {
-                    Label("Delete", systemImage: "trash")
+                return albumCompare == .orderedAscending
+            }
+        case .dateAdded:
+            return orderedPlaylistSongsByDateAdded(playlist: playlist, songs: raw)
+        case .custom:
+            return orderedPlaylistSongs(playlist: playlist, songs: raw)
+        }
+    }
+
+    private var playlistSongs: [Song] {
+        sortMode == .custom ? customOrderedSongs : displayedSongs()
+    }
+
+    private func playlistSongRow(_ song: Song) -> some View {
+        SongRow(
+            song: song,
+            isCurrent: playerManager.currentSong?.id == song.id,
+            action: { playContextualSong(song, in: playlistSongs) },
+            onQueueNext: { playerManager.addToQueue(song: song, playNext: true) },
+            onAddToPlaylist: { songToAddToPlaylist = song },
+            onRemoveFromPlaylist: { removeSongFromPlaylist(song) },
+            onDelete: { confirmDelete(song) }
+        )
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button { removeSongFromPlaylist(song) } label: {
+                Label("Remove from Playlist", systemImage: "minus.circle")
+            }
+            .tint(.orange)
+            Button { playerManager.addToQueue(song: song, playNext: true) } label: {
+                Label("Queue", systemImage: "text.badge.plus")
+            }
+            .tint(.blue)
+            Button(role: .destructive) { confirmDelete(song) } label: {
+                Label("Delete from Library", systemImage: "trash")
+            }
+            .tint(.red)
+        }
+    }
+
+    private var playlistList: some View {
+        let count = playlistSongs.count
+        return List {
+            Section {
+                ForEach(playlistSongs) { song in
+                    playlistSongRow(song)
                 }
-                .tint(.red)
+                .onMove(perform: movePlaylistSong)
+                .moveDisabled(sortMode != .custom)
+            } header: {
+                Text("\(count) song\(count == 1 ? "" : "s")")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            if playerManager.currentSong != nil {
+                Color.clear
+                    .frame(height: 120)
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
             }
         }
-        .navigationTitle(playlist.name)
+    }
+
+    var body: some View {
+        playlistList
+            .navigationTitle(playlist.name)
         .listStyle(.plain)
+        .onAppear {
+            sortMode = getPlaylistSortMode(for: playlist)
+            if sortMode == .custom {
+                customOrderedSongs = orderedPlaylistSongs(playlist: playlist, songs: playlist.songs ?? [])
+            }
+        }
+        .onChange(of: sortMode) { _, newMode in
+            setPlaylistSortMode(for: playlist, mode: newMode)
+            if newMode == .custom {
+                customOrderedSongs = orderedPlaylistSongs(playlist: playlist, songs: playlist.songs ?? [])
+            }
+        }
+        .onChange(of: playlist.songs?.count ?? 0) { _, _ in
+            if sortMode == .custom {
+                customOrderedSongs = orderedPlaylistSongs(playlist: playlist, songs: playlist.songs ?? [])
+            }
+        }
         .confirmationDialog(
             "Delete Song",
             isPresented: .constant(songToDelete != nil),
@@ -2082,6 +2707,25 @@ struct PlaylistDetailView: View {
         }
         .toolbar {
             ToolbarItemGroup(placement: .navigationBarTrailing) {
+                Menu {
+                    ForEach(PlaylistSortMode.allCases, id: \.self) { mode in
+                        Button {
+                            sortMode = mode
+                            if mode == .custom {
+                                customOrderedSongs = orderedPlaylistSongs(playlist: playlist, songs: playlist.songs ?? [])
+                            }
+                        } label: {
+                            HStack {
+                                Text(mode.rawValue)
+                                if sortMode == mode { Image(systemName: "checkmark") }
+                            }
+                        }
+                    }
+                } label: {
+                    Image(systemName: "arrow.up.arrow.down.circle")
+                        .foregroundColor(.yellow)
+                }
+                
                 Button {
                     if let randomSong = playlistSongs.randomElement() {
                         playerManager.play(song: randomSong, from: playlistSongs)
@@ -2089,15 +2733,81 @@ struct PlaylistDetailView: View {
                     }
                 } label: {
                     Image(systemName: "shuffle")
-                        .foregroundColor(.green)
+                        .foregroundColor(.yellow)
                 }
                 
                 NavigationLink(destination: AddSongsToPlaylistView(playlist: playlist, allSongs: allSongs)) {
                     Image(systemName: "plus")
-                        .foregroundColor(.green)
+                        .foregroundColor(.yellow)
+                }
+            }
+            if sortMode == .custom {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    EditButton()
+                        .foregroundColor(.yellow)
                 }
             }
         }
+        .sheet(item: $songToAddToPlaylist) { song in
+            PlaylistPickerSheet(
+                song: song,
+                onDismiss: {
+                    songToAddToPlaylist = nil
+                },
+                onAddedToPlaylist: { playlistName in
+                    playlistToastMessage = "Added to \(playlistName)"
+                    withAnimation(.spring()) { showPlaylistToast = true }
+                }
+            )
+            .presentationDetents([.medium, .large])
+        }
+        .overlay {
+            if showPlaylistToast {
+                VStack {
+                    Spacer()
+                    playlistToastView
+                        .padding(.bottom, 90)
+                }
+                .zIndex(100)
+                .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity), removal: .opacity))
+            }
+        }
+    }
+    
+    private var playlistToastView: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "music.note.list")
+                .foregroundColor(.primary)
+            Text(playlistToastMessage)
+                .font(.subheadline.bold())
+                .foregroundColor(.primary)
+        }
+        .padding(.vertical, 12)
+        .padding(.horizontal, 20)
+        .background(.ultraThinMaterial)
+        .clipShape(Capsule())
+        .overlay(Capsule().stroke(Color.primary.opacity(0.1), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.1), radius: 10, x: 0, y: 5)
+        .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                withAnimation(.spring()) { showPlaylistToast = false }
+            }
+        }
+    }
+    
+    /// Reorder in Custom sort mode; updates local state and persisted order.
+    private func movePlaylistSong(from source: IndexSet, to destination: Int) {
+        customOrderedSongs.move(fromOffsets: source, toOffset: destination)
+        setPlaylistOrderFromSongs(playlist: playlist, songs: customOrderedSongs)
+    }
+
+    /// Removes the song from this playlist only; does not delete from library.
+    private func removeSongFromPlaylist(_ song: Song) {
+        if playlist.songs == nil { playlist.songs = [] }
+        playlist.songs?.removeAll { $0.id == song.id }
+        removeSongFromPlaylistOrder(playlist: playlist, song: song)
+        recordHistory(context: modelContext, action: "removed_from_playlist", songTitle: song.title, songArtist: song.artist, playlistName: playlist.name)
+        try? modelContext.save()
     }
     
     // MARK: - Delete Song Function
@@ -2134,14 +2844,20 @@ struct PlaylistDetailView: View {
         if fileManager.fileExists(atPath: fileURL.path) {
             do {
                 try fileManager.removeItem(at: fileURL)
+                #if DEBUG
                 print("Successfully deleted file: \(fileURL.lastPathComponent)")
+                #endif
             } catch {
+                #if DEBUG
                 print("Error deleting file \(fileURL.lastPathComponent): \(error.localizedDescription)")
+                #endif
                 // Continue with database deletion even if file delete fails
                 // (file might have been moved/deleted externally)
             }
         } else {
+            #if DEBUG
             print("File does not exist at path: \(fileURL.path), removing from database only")
+            #endif
         }
         
         // 4. Remove from all playlists (SwiftData relationship will handle this automatically)
@@ -2149,17 +2865,21 @@ struct PlaylistDetailView: View {
         if let playlists = song.playlists {
             for playlist in playlists {
                 playlist.songs?.removeAll { $0.id == song.id }
+                removeSongFromPlaylistOrder(playlist: playlist, song: song)
             }
         }
         
-        // 5. Delete from SwiftData
+        // 5. Record history then delete from SwiftData
+        recordHistory(context: modelContext, action: "deleted_from_library", songTitle: song.title, songArtist: song.artist)
         modelContext.delete(song)
         
         // 6. Save the context
         do {
             try modelContext.save()
         } catch {
+            #if DEBUG
             print("Error saving after delete: \(error.localizedDescription)")
+            #endif
         }
     }
 
@@ -2186,7 +2906,7 @@ struct MiniPlayerView: View {
                 // 1. Progress Bar
                 ProgressView(value: progressTracker.currentTime, total: progressTracker.duration)
                     .progressViewStyle(.linear)
-                    .tint(.green)
+                    .tint(.yellow)
                     .frame(height: 2)
 
                 HStack(spacing: 12) {
@@ -2214,10 +2934,17 @@ struct MiniPlayerView: View {
                                 .font(.system(size: 18))
                         }
 
-                        Button { playerManager.togglePause() } label: {
+                        Button {
+                            #if os(iOS)
+                            let impact = UIImpactFeedbackGenerator(style: .light)
+                            impact.impactOccurred(intensity: 0.6)
+                            #endif
+                            playerManager.togglePause()
+                        } label: {
                             Image(systemName: playerManager.isPlaying ? "pause.fill" : "play.fill")
                                 .font(.system(size: 24))
                         }
+                        .buttonStyle(.plain)
 
                         Button {
                             playerManager.nextTrack() // No parameter needed anymore!
@@ -2226,7 +2953,7 @@ struct MiniPlayerView: View {
                                 .font(.system(size: 18))
                         }
                     }
-                    .foregroundStyle(.green)
+                    .foregroundStyle(.yellow)
                     .padding(.trailing, 8)
                 }
                 .padding(.horizontal)
@@ -2277,7 +3004,7 @@ struct LiveSlider: View {
                     }
                 }
             )
-            .accentColor(.green)
+            .accentColor(.yellow)
             .onChange(of: sliderValue) { oldValue, newValue in
                 // Update scrub value as user drags - only if we're scrubbing
                 if internalIsScrubbing {
@@ -2322,7 +3049,7 @@ struct FullPlayerView: View {
     
     // Properties passed from parent
     let playerManager: PlayerManager
-    let song: Song
+    let song: Song // Initial song (fallback)
     let allPlaylists: [Playlist] // Pass this in instead of @Query
     
     var onNavigateToArtist: ((String) -> Void)? = nil
@@ -2330,6 +3057,11 @@ struct FullPlayerView: View {
 
     @State private var dragOffset: CGFloat = 0
     @State private var showingQueue = false
+    
+    // Use currentSong from playerManager, fallback to initial song
+    private var currentSong: Song {
+        playerManager.currentSong ?? song
+    }
 
     var body: some View {
         VStack(spacing: 20) {
@@ -2377,7 +3109,7 @@ struct FullPlayerView: View {
 
     private var artworkSection: some View {
         ZStack {
-            if let data = song.artworkContainer?.data {
+            if let data = currentSong.artworkContainer?.data {
                 // MEMORY OPTIMIZATION: Downscale large artwork for display
                 ArtworkImageView(data: data, maxSize: 380)
             } else {
@@ -2394,31 +3126,33 @@ struct FullPlayerView: View {
         .shadow(color: .black.opacity(0.4), radius: 30, x: 0, y: 15)
         .scaleEffect(1.0 - (dragOffset / 1000))
         .padding(.top, 20)
+        .id(currentSong.id) // Force view refresh when song changes
     }
 
     private var infoSection: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(song.title)
+            Text(currentSong.title)
                 .font(.title2).bold()
                 .foregroundColor(.white)
             
-            Text(song.artist)
+            Text(currentSong.artist)
                 .font(.title3)
-                .foregroundColor(.green)
+                .foregroundColor(.yellow)
                 .onTapGesture {
-                    onNavigateToArtist?(song.artist)
+                    onNavigateToArtist?(currentSong.artist)
                 }
             
             // Suggestion: Add Album Navigation too!
-            Text(song.album)
+            Text(currentSong.album)
                 .font(.subheadline)
                 .foregroundColor(.gray)
                 .onTapGesture {
-                    onNavigateToAlbum?(song.album)
+                    onNavigateToAlbum?(currentSong.album)
                 }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 35)
+        .id(currentSong.id) // Force view refresh when song changes
     }
 
     private var controlsSection: some View {
@@ -2459,7 +3193,7 @@ struct FullPlayerView: View {
             Button(action: { playerManager.toggleShuffle() }) {
                 Image(systemName: "shuffle")
                     .font(.title2)
-                    .foregroundColor(playerManager.isShuffleOn ? .green : .white)
+                    .foregroundColor(playerManager.isShuffleOn ? .yellow : .white)
             }
             Spacer()
             Menu {
@@ -2474,7 +3208,7 @@ struct FullPlayerView: View {
                 Image(systemName: "list.bullet").font(.title2)
             }
         }
-        .foregroundColor(.green)
+        .foregroundColor(.yellow)
         .padding(.horizontal, 40)
         .padding(.bottom, 30)
     }
@@ -2482,7 +3216,7 @@ struct FullPlayerView: View {
     private var backgroundView: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            if let data = song.artworkContainer?.data {
+            if let data = currentSong.artworkContainer?.data {
                 // MEMORY OPTIMIZATION: Use smaller image for blur background (blur hides detail anyway)
                 ArtworkImageView(data: data, maxSize: 200)
                     .blur(radius: 60)
@@ -2490,6 +3224,7 @@ struct FullPlayerView: View {
                     .ignoresSafeArea()
             }
         }
+        .id(currentSong.id) // Force view refresh when song changes
     }
 
     private var dismissGesture: some Gesture {
@@ -2523,7 +3258,7 @@ struct FullPlayerView: View {
                 if let current = playerManager.currentSong {
                     Section("Now Playing") {
                         QueueRow(song: current)
-                            .listRowBackground(Color.green.opacity(0.1))
+                            .listRowBackground(Color.yellow.opacity(0.1))
                     }
                 }
                 Section("Up Next") {
@@ -2548,11 +3283,15 @@ struct FullPlayerView: View {
 
     private func addToPlaylist(_ playlist: Playlist) {
         if let songs = playlist.songs {
-            if !songs.contains(where: { $0.id == song.id }) {
-                playlist.songs?.append(song)
+            if !songs.contains(where: { $0.id == currentSong.id }) {
+                playlist.songs?.append(currentSong)
+                appendSongToPlaylistOrder(playlist: playlist, song: currentSong)
+                recordHistory(context: modelContext, action: "added_to_playlist", songTitle: currentSong.title, songArtist: currentSong.artist, playlistName: playlist.name)
             }
         } else {
-            playlist.songs = [song]
+            playlist.songs = [currentSong]
+            appendSongToPlaylistOrder(playlist: playlist, song: currentSong)
+            recordHistory(context: modelContext, action: "added_to_playlist", songTitle: currentSong.title, songArtist: currentSong.artist, playlistName: playlist.name)
         }
         try? modelContext.save()
     }
@@ -2562,10 +3301,17 @@ struct PlayPauseButton: View {
     @ObservedObject var playerManager: PlayerManager
     
     var body: some View {
-        Button { playerManager.togglePause() } label: {
+        Button {
+            #if os(iOS)
+            let impact = UIImpactFeedbackGenerator(style: .light)
+            impact.impactOccurred(intensity: 0.6)
+            #endif
+            playerManager.togglePause()
+        } label: {
             Image(systemName: playerManager.isPlaying ? "pause.circle.fill" : "play.circle.fill")
                 .font(.system(size: 80))
         }
+        .buttonStyle(.plain)
     }
 }
 
@@ -2648,7 +3394,7 @@ struct AlbumDetailView: View {
                     Text(albumArtist)
                         .font(.title3)
                         .fontWeight(.medium)
-                        .foregroundColor(.green)
+                        .foregroundColor(.yellow)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(.bottom, 8)
@@ -2756,14 +3502,20 @@ struct AlbumDetailView: View {
         if fileManager.fileExists(atPath: fileURL.path) {
             do {
                 try fileManager.removeItem(at: fileURL)
+                #if DEBUG
                 print("Successfully deleted file: \(fileURL.lastPathComponent)")
+                #endif
             } catch {
+                #if DEBUG
                 print("Error deleting file \(fileURL.lastPathComponent): \(error.localizedDescription)")
+                #endif
                 // Continue with database deletion even if file delete fails
                 // (file might have been moved/deleted externally)
             }
         } else {
+            #if DEBUG
             print("File does not exist at path: \(fileURL.path), removing from database only")
+            #endif
         }
         
         // 4. Remove from all playlists (SwiftData relationship will handle this automatically)
@@ -2771,17 +3523,21 @@ struct AlbumDetailView: View {
         if let playlists = song.playlists {
             for playlist in playlists {
                 playlist.songs?.removeAll { $0.id == song.id }
+                removeSongFromPlaylistOrder(playlist: playlist, song: song)
             }
         }
         
-        // 5. Delete from SwiftData
+        // 5. Record history then delete from SwiftData
+        recordHistory(context: modelContext, action: "deleted_from_library", songTitle: song.title, songArtist: song.artist)
         modelContext.delete(song)
         
         // 6. Save the context
         do {
             try modelContext.save()
         } catch {
+            #if DEBUG
             print("Error saving after delete: \(error.localizedDescription)")
+            #endif
         }
     }
 
@@ -2821,7 +3577,7 @@ struct AlbumDetailView: View {
                     }
                 } label: {
                     Image(systemName: "shuffle")
-                        .foregroundColor(.green)
+                        .foregroundColor(.yellow)
                 }
             }
         }
@@ -2912,7 +3668,22 @@ struct SongArtworkView: View {
     
     // MEMORY OPTIMIZATION: Cache downscaled images and only load when visible
     @State private var cachedImage: UIImage?
+    @State private var artworkData: Data?
     @State private var hasAppeared = false
+    
+    // Extract artwork data in initializer to avoid accessing invalidated objects later
+    init(song: Song, size: CGFloat = 50) {
+        self.song = song
+        self.size = size
+        // Extract data immediately when view is created, before object might be invalidated
+        _artworkData = State(initialValue: {
+            // Safely extract data by accessing it once at initialization
+            if let container = song.artworkContainer {
+                return container.data
+            }
+            return nil
+        }())
+    }
     
     var body: some View {
         ZStack {
@@ -2921,17 +3692,25 @@ struct SongArtworkView: View {
                 Image(uiImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
-            } else if let data = song.artworkContainer?.data {
+            } else if let data = artworkData {
                 // Load and downscale image
                 Color.clear
                     .onAppear {
                         hasAppeared = true
                         loadAndDownscaleImage(data: data, targetSize: size)
                     }
-                    .onChange(of: song.id) { _, _ in
+                    .onChange(of: song.id) { oldId, newId in
                         // Reload image when song changes
                         cachedImage = nil
-                        loadAndDownscaleImage(data: data, targetSize: size)
+                        // Re-extract data when song changes - safely access the new song's artwork
+                        // The new song should be valid since we're responding to its id change
+                        artworkData = nil
+                        // Use a local variable to safely extract data
+                        let container = song.artworkContainer
+                        artworkData = container?.data
+                        if let newData = artworkData {
+                            loadAndDownscaleImage(data: newData, targetSize: size)
+                        }
                     }
             } else {
                 // Show placeholder if no artwork data
@@ -2947,9 +3726,13 @@ struct SongArtworkView: View {
         }
         .frame(width: size, height: size)
         .clipShape(RoundedRectangle(cornerRadius: 4))
-        .onChange(of: song.id) { _, _ in
+        .onChange(of: song.id) { oldId, newId in
             // Reset cache when song changes (handles case where artwork data might change)
             cachedImage = nil
+            // Re-extract data when song changes - safely access the new song's artwork
+            artworkData = nil
+            let container = song.artworkContainer
+            artworkData = container?.data
         }
     }
     
@@ -2987,6 +3770,23 @@ struct PlaylistPickerSheet: View {
     let onDismiss: () -> Void
     var onAddedToPlaylist: ((String) -> Void)? = nil
     
+    /// Which folders are expanded (collapsed when not in set). Start empty = all collapsed for easier scrolling.
+    @State private var expandedFolderIDs: Set<PersistentIdentifier> = []
+    
+    private func isExpanded(_ folder: Folder) -> Bool {
+        expandedFolderIDs.contains(folder.persistentModelID)
+    }
+    
+    private func bindingForFolder(_ folder: Folder) -> Binding<Bool> {
+        Binding(
+            get: { isExpanded(folder) },
+            set: { new in
+                if new { expandedFolderIDs.insert(folder.persistentModelID) }
+                else { expandedFolderIDs.remove(folder.persistentModelID) }
+            }
+        )
+    }
+    
     var body: some View {
         NavigationStack {
             ZStack {
@@ -3019,10 +3819,10 @@ struct PlaylistPickerSheet: View {
                             }
                         }
                         
-                        // Folders with their playlists and sub-folders
+                        // Collapsible folders with their playlists and sub-folders
                         let topLevelFolders = allFolders.filter { $0.parent == nil }
-                        ForEach(topLevelFolders) { folder in
-                            folderSection(for: folder)
+                        ForEach(topLevelFolders.sorted(by: { $0.sortOrder < $1.sortOrder }), id: \.persistentModelID) { folder in
+                            folderDisclosureGroup(folder: folder)
                         }
                     }
                     .scrollContentBackground(.hidden)
@@ -3040,33 +3840,25 @@ struct PlaylistPickerSheet: View {
         }
     }
     
-    private func folderSection(for folder: Folder) -> some View {
-        // Get playlists directly in this folder (not in sub-folders)
+    /// One collapsible row per folder: label shows folder name; content shows playlists and nested sub-folders.
+    private func folderDisclosureGroup(folder: Folder) -> some View {
         let folderPlaylists = playlists.filter { $0.parentFolder?.persistentModelID == folder.persistentModelID }
+        let subFolders = folder.subFolders.sorted(by: { $0.sortOrder < $1.sortOrder })
         
-        // Get all playlists in sub-folders to show them with full path
-        let allPlaylistsInSubFolders = playlists.filter { playlist in
-            guard let playlistFolder = playlist.parentFolder else { return false }
-            return isPlaylistInSubFolder(playlistFolder, parentFolder: folder)
-        }
-        
-        return Section {
+        return DisclosureGroup(isExpanded: bindingForFolder(folder)) {
             // Playlists directly in this folder
             ForEach(folderPlaylists) { playlist in
                 playlistRow(for: playlist, folderPath: folderPath(for: folder))
             }
-            
-            // Playlists in sub-folders (with full folder path)
-            ForEach(allPlaylistsInSubFolders) { playlist in
-                if let playlistFolder = playlist.parentFolder {
-                    playlistRow(for: playlist, folderPath: folderPath(for: playlistFolder))
-                }
+            // Sub-folders (each is a collapsible DisclosureGroup)
+            ForEach(subFolders, id: \.persistentModelID) { sub in
+                AnyView(folderDisclosureGroup(folder: sub))
             }
-        } header: {
+        } label: {
             HStack(spacing: 8) {
                 Image(systemName: "folder.fill")
                     .foregroundColor(.yellow)
-                    .font(.system(size: 14))
+                    .font(.system(size: 16))
                 Text(folder.name)
                     .font(.headline)
             }
@@ -3092,7 +3884,7 @@ struct PlaylistPickerSheet: View {
             HStack(spacing: 12) {
                 // Playlist icon
                 Image(systemName: "music.note.list")
-                    .foregroundColor(.green)
+                    .foregroundColor(.yellow)
                     .font(.system(size: 16))
                 
                 VStack(alignment: .leading, spacing: 2) {
@@ -3110,7 +3902,7 @@ struct PlaylistPickerSheet: View {
                 
                 if let songs = playlist.songs, songs.contains(where: { $0.id == song.id }) {
                     Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(.green)
+                        .foregroundColor(.yellow)
                 }
             }
         }
@@ -3135,6 +3927,8 @@ struct PlaylistPickerSheet: View {
             } else {
                 playlist.songs = [song]
             }
+            appendSongToPlaylistOrder(playlist: playlist, song: song)
+            recordHistory(context: modelContext, action: "added_to_playlist", songTitle: song.title, songArtist: song.artist, playlistName: playlist.name)
             try? modelContext.save()
             onAddedToPlaylist?(playlist.name)
         }

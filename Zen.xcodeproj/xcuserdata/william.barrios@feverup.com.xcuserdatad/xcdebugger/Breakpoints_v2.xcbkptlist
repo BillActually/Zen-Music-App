@@ -16,7 +16,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "57"
             endingLineNumber = "57"
-            landmarkName = "deleteSong(_:)"
+            landmarkName = "checkForPendingWidgetAction()"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>

@@ -57,7 +57,9 @@ actor SongImporter {
             // Clear the array reference to help with memory (allSongs will be deallocated)
             // The existingURLs Set now contains all we need
         } catch {
+            #if DEBUG
             print("Error fetching existing songs: \(error)")
+            #endif
         }
         
         // Yield again after fetch to prevent blocking
@@ -117,18 +119,31 @@ actor SongImporter {
                     }
                 }
             } catch {
+                #if DEBUG
                 print("DEBUG: Could not load metadata for \(url.lastPathComponent), using filename.")
+                #endif
             }
 
             // 3. Create and Insert
-            // Use standardized URL to ensure consistency
-            let songURL = url.standardized
-            let newSong = Song(title: title, artist: artist, album: album, url: songURL)
+            // CRITICAL: Always create a clean file URL from the path to avoid percent-encoding issues
+            // AVPlayer cannot handle URLs with percent-encoded characters in the path (error -17913)
+            // Use fileURLWithPath to ensure we get a clean file URL without encoding
+            let cleanPath = url.path
+            let cleanURL = URL(fileURLWithPath: cleanPath, isDirectory: false)
+            
+            let newSong = Song(title: title, artist: artist, album: album, url: cleanURL)
             if let data = artworkData {
                 newSong.artworkContainer = SongArtwork(data: data)
             }
             
             modelContext.insert(newSong)
+            let container = modelContext.container
+            let songTitle = title
+            let songArtist = artist
+            await MainActor.run {
+                let ctx = ModelContext(container)
+                recordHistory(context: ctx, action: "added_to_library", songTitle: songTitle, songArtist: songArtist)
+            }
             existingURLs.insert(standardizedURL)
             
             // 4. Cleanup & UI update
@@ -154,7 +169,9 @@ actor SongImporter {
                 do {
                     try modelContext.save()
                 } catch {
+                    #if DEBUG
                     print("Error saving batch: \(error)")
+                    #endif
                 }
             }
         }

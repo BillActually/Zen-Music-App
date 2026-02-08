@@ -3,6 +3,7 @@ import AVFoundation
 import Combine
 import SwiftUI
 import MediaPlayer
+import WidgetKit
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -50,12 +51,80 @@ class PlayerManager: NSObject, ObservableObject {
     let progressTracker = ProgressTracker()
     private var timer: AnyCancellable?
     
+    /// Called when a song has been played 10+ seconds (for listening stats). Set by ContentView.
+    var onPlayRecord: ((Song) -> Void)?
+    
     override init() {
         super.init()
         setupRemoteCommandCenter()
+        setupWidgetNotifications()
         #if os(iOS)
         let audioSession = AVAudioSession.sharedInstance()
         try? audioSession.setCategory(.playback, mode: .default, policy: .longFormAudio)
+        #endif
+    }
+
+    // MARK: - Widget Darwin Notifications
+    private func setupWidgetNotifications() {
+        // Register for toggle notification from widget
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            Unmanaged.passUnretained(self).toOpaque(),
+            { _, observer, _, _, _ in
+                guard let observer = observer else { return }
+                let manager = Unmanaged<PlayerManager>.fromOpaque(observer).takeUnretainedValue()
+                DispatchQueue.main.async {
+                    #if DEBUG
+                    print("Widget: Darwin toggle notification received")
+                    #endif
+                    manager.togglePause()
+                }
+            },
+            "com.williambarrios.zen.toggle" as CFString,
+            nil,
+            .deliverImmediately
+        )
+
+        // Register for next notification from widget
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            Unmanaged.passUnretained(self).toOpaque(),
+            { _, observer, _, _, _ in
+                guard let observer = observer else { return }
+                let _ = Unmanaged<PlayerManager>.fromOpaque(observer).takeUnretainedValue()
+                DispatchQueue.main.async {
+                    #if DEBUG
+                    print("Widget: Darwin next notification received")
+                    #endif
+                    NotificationCenter.default.post(name: NSNotification.Name("ZenWidgetAction"), object: nil, userInfo: ["action": "next"])
+                }
+            },
+            "com.williambarrios.zen.next" as CFString,
+            nil,
+            .deliverImmediately
+        )
+
+        // Register for previous notification from widget
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            Unmanaged.passUnretained(self).toOpaque(),
+            { _, observer, _, _, _ in
+                guard let observer = observer else { return }
+                let _ = Unmanaged<PlayerManager>.fromOpaque(observer).takeUnretainedValue()
+                DispatchQueue.main.async {
+                    #if DEBUG
+                    print("Widget: Darwin previous notification received")
+                    #endif
+                    NotificationCenter.default.post(name: NSNotification.Name("ZenWidgetAction"), object: nil, userInfo: ["action": "previous"])
+                }
+            },
+            "com.williambarrios.zen.previous" as CFString,
+            nil,
+            .deliverImmediately
+        )
+
+        #if DEBUG
+        print("Widget: Registered Darwin notification observers in PlayerManager")
         #endif
     }
 
@@ -67,7 +136,9 @@ class PlayerManager: NSObject, ObservableObject {
         do {
             try AVAudioSession.sharedInstance().setActive(true)
         } catch {
+            #if DEBUG
             print("Failed to activate audio session: \(error)")
+            #endif
         }
         #endif
         
@@ -129,17 +200,21 @@ class PlayerManager: NSObject, ObservableObject {
         }
         
         // 2. Prevent overlapping loads
-        guard !isTaskLoading else { 
+        guard !isTaskLoading else {
+            #if DEBUG
             print("DEBUG: Already loading, skipping")
-            return 
+            #endif
+            return
         }
         isTaskLoading = true
         
         var url = song.url
+        #if DEBUG
         print("DEBUG: Attempting to play song: \(song.title)")
         print("DEBUG: Original URL: \(url)")
         print("DEBUG: URL path: \(url.path)")
         print("DEBUG: URL absoluteString: \(url.absoluteString)")
+        #endif
         
         // Try to fix potential URL encoding issues
         // If the URL has encoded characters, try creating a new one from the Documents directory
@@ -147,12 +222,16 @@ class PlayerManager: NSObject, ObservableObject {
         let filename = url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent
         let alternativeURL = documentsPath.appendingPathComponent(filename)
         
+        #if DEBUG
         print("DEBUG: Trying alternative URL with decoded filename: \(alternativeURL.path)")
+        #endif
         
         // Use the alternative URL if it's different (might fix encoding issues)
         // AVPlayer will handle errors if the file doesn't exist
         url = alternativeURL
+        #if DEBUG
         print("DEBUG: Using URL: \(url.path)")
+        #endif
         
         // Only use security-scoped resource access if the URL requires it
         // Files in Documents directory typically don't need this
@@ -161,11 +240,15 @@ class PlayerManager: NSObject, ObservableObject {
         // Store the currently accessing URL so we can stop it later
         if isAccessing {
             currentAccessingURL = url
+            #if DEBUG
             print("DEBUG: Started security-scoped resource access")
+            #endif
         } else {
             // If security-scoped access isn't needed, clear any previous access
             currentAccessingURL = nil
+            #if DEBUG
             print("DEBUG: Security-scoped resource access not needed")
+            #endif
         }
         
         let asset = AVURLAsset(url: url)
@@ -179,10 +262,14 @@ class PlayerManager: NSObject, ObservableObject {
         // 4. Thread-Safe Player Update
         if avPlayer == nil {
             avPlayer = AVPlayer(playerItem: playerItem)
+            #if DEBUG
             print("DEBUG: Created new AVPlayer")
+            #endif
         } else {
             avPlayer?.replaceCurrentItem(with: playerItem)
+            #if DEBUG
             print("DEBUG: Replaced current item")
+            #endif
         }
         
         // MEMORY OPTIMIZATION: Store observer to clean up properly
@@ -192,14 +279,19 @@ class PlayerManager: NSObject, ObservableObject {
         // Observe player item status and play when ready
         playerItemStatusObserver = playerItem.observe(\.status, options: [.new]) { [weak self] item, _ in
             guard let self = self else { return }
+            #if DEBUG
             print("DEBUG: Player item status changed to: \(item.status.rawValue)")
-            
+            #endif
+
             if item.status == .readyToPlay {
+                #if DEBUG
                 print("DEBUG: Player item is ready to play, starting playback")
+                #endif
                 DispatchQueue.main.async {
                     self.avPlayer?.play()
                     // Update isPlaying based on actual player rate
                     self.isPlaying = (self.avPlayer?.rate ?? 0) > 0
+                    #if DEBUG
                     if self.avPlayer?.rate == 0 {
                         print("WARNING: Player rate is 0 after play() call")
                         if let error = self.avPlayer?.error {
@@ -208,10 +300,12 @@ class PlayerManager: NSObject, ObservableObject {
                     } else {
                         print("DEBUG: Playback started successfully, rate: \(self.avPlayer?.rate ?? 0)")
                     }
+                    #endif
                     self.playerItemStatusObserver?.invalidate()
                     self.playerItemStatusObserver = nil
                 }
             } else if item.status == .failed {
+                #if DEBUG
                 print("ERROR: Player item failed to load")
                 if let error = item.error {
                     print("ERROR: Error description: \(error.localizedDescription)")
@@ -219,6 +313,7 @@ class PlayerManager: NSObject, ObservableObject {
                 } else {
                     print("ERROR: Unknown error")
                 }
+                #endif
                 self.playerItemStatusObserver?.invalidate()
                 self.playerItemStatusObserver = nil
             }
@@ -241,7 +336,9 @@ class PlayerManager: NSObject, ObservableObject {
                     }
                 }
             } catch {
+                #if DEBUG
                 print("Failed to load duration: \(error)")
+                #endif
             }
             
             // 6. ALWAYS release the loading lock
@@ -395,10 +492,10 @@ class PlayerManager: NSObject, ObservableObject {
     
     func togglePause() {
         guard let player = avPlayer else { return }
-        
+
         // Check actual player state, not just our flag
         let isActuallyPlaying = player.rate > 0
-        
+
         if isActuallyPlaying {
             player.pause()
             isPlaying = false
@@ -406,8 +503,21 @@ class PlayerManager: NSObject, ObservableObject {
             player.play()
             isPlaying = true
         }
-        
+
         updatePlaybackRate()
+        updateWidgetState(song: currentSong)
+    }
+    
+    /// Widget "toggle": if no song playing, start random; otherwise toggle play/pause.
+    @MainActor
+    func togglePauseOrStartRandom(allSongs: [Song]) {
+        if currentSong == nil {
+            guard !allSongs.isEmpty else { return }
+            if !isShuffleOn { toggleShuffle() }
+            play(song: allSongs.randomElement()!, from: allSongs)
+        } else {
+            togglePause()
+        }
     }
 
     private func updatePlaybackRate() {
@@ -530,6 +640,51 @@ class PlayerManager: NSObject, ObservableObject {
             #endif
         }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
+
+        // Update widget with current song info
+        updateWidgetState(song: song)
+    }
+
+    private func updateWidgetState(song: Song?) {
+        guard let sharedDefaults = UserDefaults(suiteName: "group.com.williambarrios.zen") else { return }
+
+        if let song = song {
+            sharedDefaults.set(song.title, forKey: "currentSongTitle")
+            sharedDefaults.set(song.artist, forKey: "currentSongArtist")
+            sharedDefaults.set(song.album, forKey: "currentSongAlbum")
+
+            // Downscale artwork for widget (max 200KB to avoid memory issues in widget)
+            if let data = song.artworkContainer?.data {
+                #if canImport(UIKit)
+                if let image = UIImage(data: data) {
+                    let maxSize: CGFloat = 150
+                    let size = image.size
+                    let scale = min(maxSize / size.width, maxSize / size.height, 1.0)
+                    let scaledSize = CGSize(width: size.width * scale, height: size.height * scale)
+
+                    UIGraphicsBeginImageContextWithOptions(scaledSize, false, 1.0)
+                    defer { UIGraphicsEndImageContext() }
+                    image.draw(in: CGRect(origin: .zero, size: scaledSize))
+                    if let scaledImage = UIGraphicsGetImageFromCurrentImageContext(),
+                       let jpegData = scaledImage.jpegData(compressionQuality: 0.7) {
+                        sharedDefaults.set(jpegData, forKey: "currentSongArtwork")
+                    }
+                }
+                #endif
+            } else {
+                sharedDefaults.removeObject(forKey: "currentSongArtwork")
+            }
+        } else {
+            sharedDefaults.set("No song playing", forKey: "currentSongTitle")
+            sharedDefaults.set("", forKey: "currentSongArtist")
+            sharedDefaults.set("", forKey: "currentSongAlbum")
+            sharedDefaults.removeObject(forKey: "currentSongArtwork")
+        }
+
+        sharedDefaults.set(isPlaying, forKey: "isPlaying")
+
+        // Tell widget to refresh
+        WidgetCenter.shared.reloadAllTimelines()
     }
 
     func setupRemoteCommandCenter() {
@@ -755,6 +910,14 @@ class PlayerManager: NSObject, ObservableObject {
                 self.queue.append(nextSong)
             }
         }
+    }
+
+    deinit {
+        // Clean up Darwin notification observers
+        CFNotificationCenterRemoveEveryObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            Unmanaged.passUnretained(self).toOpaque()
+        )
     }
 }
 
